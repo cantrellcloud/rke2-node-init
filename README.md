@@ -1,4 +1,4 @@
-# rke2nodeinit — RKE2 Air‑Gapped Image Preparation & Node Config
+# rke2nodeinit — RKE2 Air‑Gapped Image Preparation & Node Initialization
 
 This repository provides a single Bash utility, **`rke2nodeinit.sh`**, to prepare and configure **Ubuntu 24.04 LTS** VMs for **RKE2** clusters in **internet‑limited / air‑gapped** environments. It’s designed for **entry‑level admins** while following **industry best practices** for security and reliability.
 
@@ -127,7 +127,7 @@ kind: Pull
 metadata:
   name: rke2-pull
 spec:
-  rke2Version: v1.33.1+rke2r1           # optional; auto-detects if omitted
+  rke2Version: v1.34.1+rke2r1           # optional; auto-detects if omitted
   registry: kuberegistry.dev.kube/rke2  # optional; default provided
   registryUsername: admin               # optional; default provided
   registryPassword: ZAQwsx!@#123        # optional; default provided
