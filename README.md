@@ -13,7 +13,7 @@
 
 - **Air-gap ready:** pull artifacts once, push to your registry, stage images for offline server/agent setup.
 - **Runtime selection that “just works”:** prefers **containerd + nerdctl**; installs containerd if neither runtime present; uses Docker only if containerd isn’t present but Docker is.
-- **Kubernetes-style YAML** (one manifest per file): `apiVersion: rkeprep/v1`, `kind`, `metadata`, `spec` (camelCase).
+- **Kubernetes-style YAML** (one manifest per file): `apiVersion: rke2nodeinit/v1`, `kind`, `metadata`, `spec` (camelCase).
 - **Network config** prompts (or YAML): **IPv4**, **prefix (/mask)**, **single optional gateway**, **multiple DNS servers**, **search domains**.
 - **IPv6 disabled** in the `image` stage (policy-driven).
 - **Secure & observable:** checksum verification, **RFC 5424** logs to `./logs/` mirrored to console, logs gz-archived after 60 days, secrets masked when printing YAML.
@@ -64,14 +64,14 @@ sudo ./rke2nodeinit.sh verify
 
 ## YAML format (one manifest per file)
 
-- `apiVersion`: must be `rkeprep/v1`
+- `apiVersion`: must be `rke2nodeinit/v1`
 - `kind`: one of `Pull`, `Push`, `Image`, `Server`, `Agent`
 - `metadata.name`: informational
 - `spec`: camelCase keys; arrays can be YAML lists or comma-separated strings
 
 ### Pull
 ```yaml
-apiVersion: rkeprep/v1
+apiVersion: rke2nodeinit/v1
 kind: Pull
 metadata:
   name: rke2-pull
@@ -84,7 +84,7 @@ spec:
 
 ### Push
 ```yaml
-apiVersion: rkeprep/v1
+apiVersion: rke2nodeinit/v1
 kind: Push
 metadata:
   name: rke2-push
@@ -96,7 +96,7 @@ spec:
 
 ### Image
 ```yaml
-apiVersion: rkeprep/v1
+apiVersion: rke2nodeinit/v1
 kind: Image
 metadata:
   name: offline-prep
@@ -110,7 +110,7 @@ spec:
 
 ### Server
 ```yaml
-apiVersion: rkeprep/v1
+apiVersion: rke2nodeinit/v1
 kind: Server
 metadata:
   name: cluster1-server1
@@ -124,7 +124,7 @@ spec:
 
 ### Agent
 ```yaml
-apiVersion: rkeprep/v1
+apiVersion: rke2nodeinit/v1
 kind: Agent
 metadata:
   name: cluster1-agent1

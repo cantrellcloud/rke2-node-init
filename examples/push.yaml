@@ -1,4 +1,4 @@
-apiVersion: rkeprep/v1
+apiVersion: rke2nodeinit/v1
 kind: Push
 metadata:
   name: rke2-push

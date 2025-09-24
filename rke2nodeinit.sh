@@ -137,7 +137,7 @@ if [[ -n "$CONFIG_FILE" ]]; then
   [[ -f "$CONFIG_FILE" ]] || { log ERROR "YAML file not found: $CONFIG_FILE"; exit 1; }
   AV="$(yaml_get_apiversion "$CONFIG_FILE" || true)"
   YAML_KIND="$(yaml_get_kind "$CONFIG_FILE" || true)"
-  [[ "$AV" == "rkeprep/v1" ]] || { log ERROR "Unsupported apiVersion: ${AV:-<missing>} (expected rkeprep/v1)"; exit 1; }
+  [[ "$AV" == "rke2nodeinit/v1" ]] || { log ERROR "Unsupported apiVersion: ${AV:-<missing>} (expected rke2nodeinit/v1)"; exit 1; }
 
   if [[ -n "$CLI_SUB" ]]; then
     case "$(tr '[:lower:]' '[:upper:]' <<< "$CLI_SUB")" in
