@@ -1,4 +1,4 @@
-# rkeimage — RKE2 Air‑Gapped Image Preparation & Node Config
+# rke2nodeinit — RKE2 Air‑Gapped Image Preparation & Node Config
 
 This repository provides a single Bash utility, **`rke2nodeinit.sh`**, to prepare and configure **Ubuntu 24.04 LTS** VMs for **RKE2** clusters in **internet‑limited / air‑gapped** environments. It’s designed for **entry‑level admins** while following **industry best practices** for security and reliability.
 
