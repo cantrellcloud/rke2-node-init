@@ -1,0 +1,11 @@
+apiVersion: rkeprep/v1
+kind: Server
+metadata:
+  name: copine-server1
+spec:
+  ip: 10.0.69.55
+  prefix: 27
+  gateway: 10.0.69.33
+  hostname: copine-server1
+  dns: ["172.16.69.71", "172.16.69.72"]
+  searchDomains: ["dev.kube", "dev.local"]
