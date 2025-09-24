@@ -1,4 +1,4 @@
-apiVersion: rke2nodeinit/v1
+apiVersion: rkeprep/v1
 kind: Pull
 metadata:
   name: rke2-pull

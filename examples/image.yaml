@@ -1,10 +1,10 @@
-apiVersion: rke2nodeinit/v1
+apiVersion: rkeprep/v1
 kind: Image
 metadata:
   name: offline-prep
 spec:
   defaultDns: ["10.0.1.34", "10.231.1.34"]
-  defaultSearchDomains: ["corp.local", "dev.kube"]
+  defaultSearchDomains: ["dev.kube", "dev.local"]
   registry: kuberegistry.dev.kube/rke2
   registryUsername: admin
   registryPassword: ZAQwsx!@#123

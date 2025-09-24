@@ -4,22 +4,21 @@
 #
 # - Ubuntu 24.04 LTS
 # - Supports: Pull, Push, Image, Server, Agent, Verify
-# - When -f/--file is used, no subcommand is required; the script infers the
-#   action from YAML 'kind' (Pull|Push|Image|Server|Agent).
+# - With -f/--file, the subcommand is optional; inferred from YAML 'kind'.
 # - Safe defaults, strong input validation, RFC 5424 logging.
 # - QoL flags: -y/--yes (auto-reboot), -P/--print-config (mask secrets).
+# - 'image' applies OS updates and auto-reboots; stages artifacts to /opt/rke2/stage
 # =============================================================================
 
 set -Eeuo pipefail
 
 # -------------------------------
-# Global paths & log management
+# Global paths & logs
 # -------------------------------
 LOG_DIR="$(dirname "$0")/logs"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/rke2nodeinit_$(date -u +"%Y-%m-%dT%H-%M-%SZ").log"
 
-# RFC 5424-style logger (mirrors to console and file)
 log() {
   local level="$1"; shift
   local msg="$*"
@@ -29,17 +28,14 @@ log() {
   printf "%s %s rke2nodeinit[%d]: %s %s\n" "$ts" "$host" "$$" "$level:" "$msg" >> "$LOG_FILE"
 }
 
-# Archive/gzip logs older than 60 days
+# Archive logs older than 60 days
 find "$LOG_DIR" -type f -name "rke2nodeinit_*.log" -mtime +60 -exec gzip -q {} \; -exec mv {}.gz "$LOG_DIR" \; || true
 
-# Require root
-if [[ $EUID -ne 0 ]]; then
-  echo "ERROR: Please run with sudo/root."
-  exit 1
-fi
+# Root check
+if [[ $EUID -ne 0 ]]; then echo "ERROR: Please run with sudo/root."; exit 1; fi
 
 # -------------------------------
-# Defaults & CLI flags
+# Defaults & flags
 # -------------------------------
 RKE2_VERSION=""
 REGISTRY="kuberegistry.dev.kube/rke2"
@@ -76,7 +72,6 @@ Notes:
 EOF
 }
 
-# Parse flags
 while getopts ":f:v:r:u:p:yPh" opt; do
   case ${opt} in
     f) CONFIG_FILE="$OPTARG";;
@@ -92,10 +87,10 @@ while getopts ":f:v:r:u:p:yPh" opt; do
   esac
 done
 shift $((OPTIND-1))
-CLI_SUB="${1:-}"  # optional in YAML mode
+CLI_SUB="${1:-}"
 
 # -------------------------------
-# YAML helpers (one manifest/file)
+# YAML helpers
 # -------------------------------
 yaml_get_kind() { grep -E '^[[:space:]]*kind:[[:space:]]*' "$1" | awk -F: '{print $2}' | xargs; }
 yaml_get_apiversion() { grep -E '^[[:space:]]*apiVersion:[[:space:]]*' "$1" | awk -F: '{print $2}' | xargs; }
@@ -130,23 +125,21 @@ sanitize_and_print_yaml() {
 }
 
 # -------------------------------
-# Validate YAML (if provided)
+# YAML validation (if provided)
 # -------------------------------
 YAML_KIND=""
 if [[ -n "$CONFIG_FILE" ]]; then
   [[ -f "$CONFIG_FILE" ]] || { log ERROR "YAML file not found: $CONFIG_FILE"; exit 1; }
   AV="$(yaml_get_apiversion "$CONFIG_FILE" || true)"
   YAML_KIND="$(yaml_get_kind "$CONFIG_FILE" || true)"
-  [[ "$AV" == "rke2nodeinit/v1" ]] || { log ERROR "Unsupported apiVersion: ${AV:-<missing>} (expected rke2nodeinit/v1)"; exit 1; }
-
+  [[ "$AV" == "rkeprep/v1" ]] || { log ERROR "Unsupported apiVersion: ${AV:-<missing>} (expected rkeprep/v1)"; exit 1; }
   if [[ -n "$CLI_SUB" ]]; then
     case "$(tr '[:lower:]' '[:upper:]' <<< "$CLI_SUB")" in
       PULL) REQ_KIND="Pull";; PUSH) REQ_KIND="Push";; IMAGE) REQ_KIND="Image";;
-      SERVER) REQ_KIND="Server";; AGENT) REQ_KIND="Agent";; VERIFY) REQ_KIND="";; *);;
+      SERVER) REQ_KIND="Server";; AGENT) REQ_KIND="Agent";; VERIFY) REQ_KIND="";;
     esac
     if [[ -n "${REQ_KIND:-}" && "$YAML_KIND" != "$REQ_KIND" ]]; then
-      log ERROR "YAML kind '$YAML_KIND' does not match CLI subcommand '$CLI_SUB' (expected: $REQ_KIND)"
-      exit 1
+      log ERROR "YAML kind '$YAML_KIND' does not match CLI subcommand '$CLI_SUB' (expected: $REQ_KIND)"; exit 1
     fi
   fi
   [[ "$PRINT_CONFIG" -eq 1 ]] && sanitize_and_print_yaml "$CONFIG_FILE"
@@ -180,7 +173,7 @@ detect_runtime(){
 }
 
 # -------------------------------
-# Version resolution (pull path)
+# Version resolution (pull)
 # -------------------------------
 detect_latest_version(){
   if [[ -z "${RKE2_VERSION:-}" ]]; then
@@ -222,7 +215,7 @@ load_site_defaults(){
 }
 
 # -------------------------------
-# Subcommand implementations
+# Subcommands
 # -------------------------------
 sub_pull(){
   if [[ -n "$CONFIG_FILE" ]]; then
@@ -272,17 +265,44 @@ sub_push(){
 }
 
 sub_image(){
-  local WORK_DIR="$(dirname "$0")/downloads"; local REG_HOST="${REGISTRY%%/*}"; local defaultDnsCsv="$DEFAULT_DNS"; local defaultSearchCsv=""
+  # Ensure OS is patched, stage offline artifacts, write registry trust, disable IPv6, then auto-reboot.
+  local WORK_DIR="$(dirname "$0")/downloads"
+  local REG_HOST="${REGISTRY%%/*}"
+  local defaultDnsCsv="$DEFAULT_DNS"
+  local defaultSearchCsv=""
+  local STAGE_DIR="/opt/rke2/stage"
+  mkdir -p "$STAGE_DIR"
+
   if [[ -n "$CONFIG_FILE" ]]; then
     local D1="$(yaml_spec_get "$CONFIG_FILE" defaultDns || true)"; [[ -n "$D1" ]] && defaultDnsCsv="$(normalize_list_csv "$D1")"
     local S1="$(yaml_spec_get "$CONFIG_FILE" defaultSearchDomains || true)"; [[ -n "$S1" ]] && defaultSearchCsv="$(normalize_list_csv "$S1")"
     REGISTRY="$(yaml_spec_get "$CONFIG_FILE" registry || echo "$REGISTRY")"; REG_USER="$(yaml_spec_get "$CONFIG_FILE" registryUsername || echo "$REG_USER")"; REG_PASS="$(yaml_spec_get "$CONFIG_FILE" registryPassword || echo "$REG_PASS")"; REG_HOST="${REGISTRY%%/*}"
     log WARN "Using YAML values; conflicting CLI flags are overridden."
   fi
+
   [[ -f "$(dirname "$0")/certs/kuberegistry-ca.crt" ]] || { log ERROR "Missing certs/kuberegistry-ca.crt"; exit 1; }
-  cp "$(dirname "$0")/certs/kuberegistry-ca.crt" /usr/local/share/ca-certificates/kuberegistry-ca.crt; update-ca-certificates
-  mkdir -p /var/lib/rancher/rke2/agent/images/; [[ -f "$WORK_DIR/$IMAGES_TAR" ]] && cp "$WORK_DIR/$IMAGES_TAR" /var/lib/rancher/rke2/agent/images/ && log INFO "Copied images tar into agent images path"
-  mkdir -p /etc/rancher/rke2/; printf 'system-default-registry: "%s"\n' "$REG_HOST" > /etc/rancher/rke2/config.yaml
+  cp "$(dirname "$0")/certs/kuberegistry-ca.crt" /usr/local/share/ca-certificates/kuberegistry-ca.crt
+  update-ca-certificates
+
+  mkdir -p /var/lib/rancher/rke2/agent/images/
+  if [[ -f "$WORK_DIR/$IMAGES_TAR" ]]; then
+    cp "$WORK_DIR/$IMAGES_TAR" /var/lib/rancher/rke2/agent/images/ && log INFO "Copied images tar into agent images path"
+  else
+    log WARN "Images tar not found in $WORK_DIR; run 'pull' first."
+  fi
+  if [[ -f "$WORK_DIR/$RKE2_TARBALL" ]]; then
+    cp "$WORK_DIR/$RKE2_TARBALL" "$STAGE_DIR/" && log INFO "Staged $RKE2_TARBALL to $STAGE_DIR"
+  else
+    log WARN "RKE2 tarball not found in $WORK_DIR; run 'pull' first."
+  fi
+  if [[ -f "$WORK_DIR/install.sh" ]]; then
+    cp "$WORK_DIR/install.sh" "$STAGE_DIR/" && chmod +x "$STAGE_DIR/install.sh" && log INFO "Staged install.sh to $STAGE_DIR"
+  else
+    log WARN "install.sh not found in $WORK_DIR; run 'pull' first."
+  fi
+
+  mkdir -p /etc/rancher/rke2/
+  printf 'system-default-registry: "%s"\n' "$REG_HOST" > /etc/rancher/rke2/config.yaml
   cat > /etc/rancher/rke2/registries.yaml <<EOF
 mirrors:
   "docker.io":
@@ -297,13 +317,30 @@ configs:
       ca_file: "/usr/local/share/ca-certificates/kuberegistry-ca.crt"
 EOF
   chmod 600 /etc/rancher/rke2/registries.yaml
+
   cat > /etc/sysctl.d/99-disable-ipv6.conf <<EOF
 net.ipv6.conf.all.disable_ipv6 = 1
 net.ipv6.conf.default.disable_ipv6 = 1
 EOF
-  sysctl --system >/dev/null 2>>"$LOG_FILE" || true; log INFO "IPv6 disabled via sysctl."
-  STATE="/etc/rke2image.defaults"; echo "DEFAULT_DNS=\"$defaultDnsCsv\"" > "$STATE"; echo "DEFAULT_SEARCH=\"$defaultSearchCsv\"" >> "$STATE"; chmod 600 "$STATE"; log INFO "Saved site defaults: DNS=[$defaultDnsCsv] SEARCH=[$defaultSearchCsv]"
-  log INFO "image: offline staging complete."
+  sysctl --system >/dev/null 2>>"$LOG_FILE" || true
+  log INFO "IPv6 disabled via sysctl."
+
+  STATE="/etc/rke2image.defaults"
+  echo "DEFAULT_DNS=\"$defaultDnsCsv\"" > "$STATE"
+  echo "DEFAULT_SEARCH=\"$defaultSearchCsv\"" >> "$STATE"
+  chmod 600 "$STATE"
+  log INFO "Saved site defaults: DNS=[$defaultDnsCsv] SEARCH=[$defaultSearchCsv]"
+
+  # OS updates & auto-reboot
+  log INFO "Applying all current updates and patches (apt-get update && dist-upgrade) ..."
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -y
+  apt-get -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" dist-upgrade -y
+  apt-get autoremove -y || true
+  apt-get autoclean -y || true
+  log WARN "System will reboot automatically to complete updates."
+  sleep 2
+  reboot
 }
 
 sub_server(){
@@ -326,8 +363,9 @@ sub_server(){
   while ! valid_csv_dns "${S_DNS:-}"; do read -rp "Invalid DNS list. Re-enter comma-separated IPv4s: " S_DNS; done
   while ! valid_search_domains_csv "${S_SEARCH:-}"; do read -rp "Invalid search domain list. Re-enter CSV: " S_SEARCH; done
   [[ -z "${S_PREFIX:-}" ]] && S_PREFIX=24
-  local WORK_DIR="$(dirname "$0")/downloads"; [[ -f "$WORK_DIR/install.sh" ]] || { log ERROR "Missing downloads/install.sh. Run 'pull' first."; exit 1; }
-  pushd "$WORK_DIR" >/dev/null; INSTALL_RKE2_ARTIFACT_PATH="$WORK_DIR" sh install.sh >/dev/null 2>>"$LOG_FILE"; popd >/dev/null
+  local WORK_DIR="$(dirname "$0")/downloads"; local STAGE_DIR="/opt/rke2/stage"; local SRC="$STAGE_DIR"; [[ -f "$STAGE_DIR/install.sh" ]] || SRC="$WORK_DIR"
+  if [[ ! -f "$SRC/install.sh" ]]; then log ERROR "Missing install.sh. Run 'pull' then 'image' first."; exit 1; fi
+  pushd "$SRC" >/dev/null; INSTALL_RKE2_ARTIFACT_PATH="$SRC" sh install.sh >/dev/null 2>>"$LOG_FILE"; popd >/dev/null
   systemctl enable rke2-server
   hostnamectl set-hostname "$S_HOST"; grep -q "$S_HOST" /etc/hosts || echo "$S_IP $S_HOST" >> /etc/hosts
   write_netplan "$S_IP" "$S_PREFIX" "${S_GW:-}" "${S_DNS:-}" "${S_SEARCH:-}"
@@ -358,8 +396,9 @@ sub_agent(){
   [[ -z "${A_PREFIX:-}" ]] && A_PREFIX=24
   if [[ -z "${A_URL:-}" ]]; then read -rp "Enter RKE2 server URL (e.g., https://<server-ip>:9345) [optional]: " A_URL || true; fi
   if [[ -n "$A_URL" && -z "${A_TOKEN:-}" ]]; then read -rp "Enter cluster join token [optional]: " A_TOKEN || true; fi
-  local WORK_DIR="$(dirname "$0")/downloads"; [[ -f "$WORK_DIR/install.sh" ]] || { log ERROR "Missing downloads/install.sh. Run 'pull' first."; exit 1; }
-  pushd "$WORK_DIR" >/dev/null; INSTALL_RKE2_ARTIFACT_PATH="$WORK_DIR" INSTALL_RKE2_TYPE="agent" sh install.sh >/dev/null 2>>"$LOG_FILE"; popd >/dev/null
+  local WORK_DIR="$(dirname "$0")/downloads"; local STAGE_DIR="/opt/rke2/stage"; local SRC="$STAGE_DIR"; [[ -f "$STAGE_DIR/install.sh" ]] || SRC="$WORK_DIR"
+  if [[ ! -f "$SRC/install.sh" ]]; then log ERROR "Missing install.sh. Run 'pull' then 'image' first."; exit 1; fi
+  pushd "$SRC" >/dev/null; INSTALL_RKE2_ARTIFACT_PATH="$SRC" INSTALL_RKE2_TYPE="agent" sh install.sh >/dev/null 2>>"$LOG_FILE"; popd >/dev/null
   systemctl enable rke2-agent
   [[ -n "${A_URL:-}" ]] && echo "server: \"$A_URL\"" >> /etc/rancher/rke2/config.yaml
   [[ -n "${A_TOKEN:-}" ]] && echo "token: \"$A_TOKEN\"" >> /etc/rancher/rke2/config.yaml

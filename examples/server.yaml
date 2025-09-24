@@ -1,4 +1,4 @@
-apiVersion: rke2nodeinit/v1
+apiVersion: rkeprep/v1
 kind: Server
 metadata:
   name: cluster1-server1
@@ -7,4 +7,4 @@ spec:
   prefix: 24
   hostname: cluster1-server1
   dns: ["10.0.1.34", "10.231.1.34"]
-  searchDomains: ["corp.local", "dev.kube"]
+  searchDomains: ["dev.kube", "dev.local"]
