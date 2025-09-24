@@ -1,159 +1,255 @@
-# rke2nodeinit — RKE2 Air-Gapped Image Prep (Auto-Kind)
+# rke2nodeinit — RKE2 Node Image Init for Air-Gapped Clusters (Ubuntu 24.04 LTS)
 
-**rke2nodeinit** is a single Bash utility, `rke2nodeinit.sh`, to prep Ubuntu **24.04 LTS** VMs as production-ready **RKE2** (Kubernetes) Server/Agent nodes for **internet-limited or air-gapped** environments.
-
-> ### New behavior
-> When you pass **`-f file.yaml`**, you **do not need a subcommand**.  
-> The script reads the YAML’s `kind:` (`Pull`, `Push`, `Image`, `Server`, `Agent`) and runs the correct workflow automatically.  
-> (If you provide a subcommand **and** a YAML file, they must match or the script exits with an error.)
+This repository lets you prepare a single Ubuntu 24.04 VM image that can later boot as an **RKE2 Server** or **RKE2 Agent** in **internet-limited / air-gapped** environments. It follows Rancher RKE2 air-gap practices and adds helpful prompts, validation, reporting, and logging so **entry-level admins** can operate safely and consistently across **three data centers** and **four production clusters**.
 
 ---
 
-## Highlights
+## Why this repo exists
 
-- **Air-gap ready:** pull artifacts once, push to your registry, stage images for offline server/agent setup.
-- **Runtime selection that “just works”:** prefers **containerd + nerdctl**; installs containerd if neither runtime present; uses Docker only if containerd isn’t present but Docker is.
-- **Kubernetes-style YAML** (one manifest per file): `apiVersion: rkeprep/v1`, `kind`, `metadata`, `spec` (camelCase).
-- **Network config** prompts (or YAML): **IPv4**, **prefix (/mask)**, **single optional gateway**, **multiple DNS servers**, **search domains**.
-- **IPv6 disabled** in the `image` stage (policy-driven).
-- **Secure & observable:** checksum verification, **RFC 5424** logs to `./logs/` mirrored to console, logs gz-archived after 60 days, secrets masked when printing YAML.
-- **QoL flags:** `-y/--yes` (auto-reboot for server/agent), `-P/--print-config` (sanitized YAML echo for troubleshooting).
+- You want to build one golden VM image for both **RKE2 servers and agents**.
+- Your clusters will run in **offline** or **internet-restricted** networks.
+- You need **container images** staged locally and mirrored to a **private registry**.
+- You want sane defaults, **simple YAML inputs**, strong **logging**, and **checks**.
 
 ---
 
-## Image stage updates (important)
+## What this tool does
 
-- `image` now ensures the VM is **fully patched** (runs `apt-get update && dist-upgrade -y`, then `autoremove`/`autoclean`) and **reboots automatically** after staging.
-- RKE2 artifacts (tarball + `install.sh`) are staged to **`/opt/rke2/stage`** for **offline installs** later; `server`/`agent` automatically use that path (fall back to `./downloads/` if missing).
+- **containerd-first runtime** (uses `containerd`+`nerdctl` when available; falls back to Docker only if containerd isn’t present; installs containerd if neither is present).
+- **pull**: downloads RKE2 artifacts and **loads** the RKE2 image archive into the local runtime for caching.
+- **push**: **retags + pushes** all locally cached images to your offline registry (writes a **pre-push manifest** and **SBOMs**).
+- **image**: installs **RKE2 prerequisites**, trusts your registry CA, stages artifacts for offline use, **disables IPv6**, applies OS updates and **auto-reboots**.
+- **server/agent**: sets static IP, hostname, optional single gateway, **multiple DNS** servers, and **search domains**. Enables the respective RKE2 service.
+- **verify**: validates kernel modules, sysctls, swap state, runtime, staged artifacts, and CA/registry configuration.
 
----
-
-## Requirements
-
-- **OS:** Ubuntu **24.04 LTS**
-- **Privileges:** `sudo` (root)
-- **Internet:** required for `pull` and typically for `push`. Everything else is offline.
-- **CA cert:** place your registry CA at `./certs/kuberegistry-ca.crt` before running `image`.
-
-**Defaults**
-- Registry: `kuberegistry.dev.kube/rke2`
-- Credentials: `admin` / `ZAQwsx!@#123`
-- Default DNS: `10.0.1.34,10.231.1.34`
-- Default search domains: none (override in `Image` spec with `defaultSearchDomains`)
-- Subnet prefix default: `/24`
+> **Default offline registry:** `kuberegistry.dev.kube/rke2`  
+> **Default credentials:** `admin` / `ZAQwsx!@#123`  
+> **Default DNS list (server or agent):** `10.0.1.34,10.231.1.34`
 
 ---
 
-## Usage
+## Repository layout
 
-### YAML-driven (no subcommand needed)
-```bash
-sudo ./rke2nodeinit.sh -f examples/pull.yaml
-sudo ./rke2nodeinit.sh -f examples/push.yaml
-sudo ./rke2nodeinit.sh -f examples/image.yaml
-sudo ./rke2nodeinit.sh -f examples/server.yaml -y
-sudo ./rke2nodeinit.sh -f examples/agent.yaml  -y -P
+```
+rke2nodeinit_release_repo_v2/
+├─ rke2nodeinit.sh          # Main script (well-commented, readable)
+├─ README.md                # This document
+├─ certs/
+│  └─ kuberegistry-ca.crt   # <-- place your registry CA here (required)
+├─ logs/                    # Logs (created automatically)
+├─ outputs/
+│  ├─ images-manifest.txt   # Generated by `push`
+│  ├─ images-manifest.json  # Generated by `push`
+│  └─ sbom/                 # Per-image SBOMs (SPDX via syft if available)
+└─ examples/
+   ├─ pull.yaml             # kind: Pull
+   ├─ push.yaml             # kind: Push
+   ├─ image.yaml            # kind: Image
+   ├─ server.yaml           # kind: Server
+   └─ agent.yaml            # kind: Agent
 ```
 
-### Classic mode (still supported)
+---
+
+## Requirements (entry-level friendly)
+
+- A clean **Ubuntu 24.04 LTS** VM.
+- Ability to run commands as **root** (use `sudo`).
+- Your private registry’s **CA certificate** file as `certs/kuberegistry-ca.crt`.
+- Optional Internet access **only for the `pull` step** (artifact download). All later steps can be fully offline.
+
+> If `containerd` and `nerdctl` are missing, the script installs them automatically. If Docker is pre-installed and containerd is not running, Docker will be used.
+
+---
+
+## TL;DR — Golden image workflow
+
+1) **Download artifacts** and load images into the local runtime (cache):
 ```bash
-sudo ./rke2nodeinit.sh pull
-sudo ./rke2nodeinit.sh push
-sudo ./rke2nodeinit.sh image
-sudo ./rke2nodeinit.sh server
-sudo ./rke2nodeinit.sh agent
+sudo ./rke2nodeinit.sh -f examples/pull.yaml
+```
+2) **Push** images to your offline registry for use by other nodes:
+```bash
+sudo ./rke2nodeinit.sh -f examples/push.yaml
+# Preview only (no push), generate manifest & SBOMs:
+sudo ./rke2nodeinit.sh push --dry-push
+```
+3) **Prepare the template VM** for offline use (installs prereqs, stages artifacts, disables IPv6, patches OS, then reboots):
+```bash
+sudo ./rke2nodeinit.sh -f examples/image.yaml
+```
+4) **After reboot**, configure the VM to be a **Server** or **Agent** (prompts for any missing values):
+```bash
+sudo ./rke2nodeinit.sh -f examples/server.yaml  -y
+sudo ./rke2nodeinit.sh -f examples/agent.yaml   -y
+```
+5) **Sanity check** anytime:
+```bash
 sudo ./rke2nodeinit.sh verify
 ```
 
 ---
 
-## YAML format (one manifest per file)
+## Using YAML (Kubernetes-style)
 
-- `apiVersion`: must be `rkeprep/v1`
-- `kind`: one of `Pull`, `Push`, `Image`, `Server`, `Agent`
-- `metadata.name`: informational
-- `spec`: camelCase keys; arrays can be YAML lists or comma-separated strings
+- Every file contains **exactly one** object.
+- `apiVersion: rkeprep/v1`
+- `kind: Pull | Push | Image | Server | Agent`
+- `metadata.name`: free-form name string
+- `spec`: fields in **camelCase**
 
-### Pull
+### Pull — fields
 ```yaml
 apiVersion: rkeprep/v1
 kind: Pull
 metadata:
-  name: rke2-pull
+  name: rke2-artifacts
 spec:
-  rke2Version: v1.33.1+rke2r1
+  rke2Version: v1.33.1+rke2r1   # optional; auto-detects if omitted
   registry: kuberegistry.dev.kube/rke2
   registryUsername: admin
   registryPassword: ZAQwsx!@#123
 ```
+**What it does**: downloads the RKE2 image archive & tarball, verifies checksums, saves the installer, and **loads** the images into the local runtime cache.
 
-### Push
+### Push — fields
 ```yaml
 apiVersion: rkeprep/v1
 kind: Push
 metadata:
-  name: rke2-push
+  name: push-to-offline-registry
 spec:
   registry: kuberegistry.dev.kube/rke2
   registryUsername: admin
   registryPassword: ZAQwsx!@#123
 ```
+**What it does**: logs in, loads the images archive if needed, then **retags & pushes** all images to your registry. Also writes:
+- `outputs/images-manifest.txt`
+- `outputs/images-manifest.json`
+- SBOMs under `outputs/sbom/` (SPDX via `syft`, else fallback `inspect` JSON)
 
-### Image
+> Use `--dry-push` to produce reports & SBOMs **without** pushing.
+
+### Image — fields
 ```yaml
 apiVersion: rkeprep/v1
 kind: Image
 metadata:
-  name: offline-prep
+  name: template-prep
 spec:
   defaultDns: ["10.0.1.34", "10.231.1.34"]
-  defaultSearchDomains: ["dev.kube", "dev.local"]
+  defaultSearchDomains: ["corp.local", "dev.kube"]
   registry: kuberegistry.dev.kube/rke2
   registryUsername: admin
   registryPassword: ZAQwsx!@#123
 ```
+**What it does**: installs RKE2 prerequisites; installs & trusts the registry CA; stages the RKE2 images tar and tarball for offline installation; writes `registries.yaml`; **disables IPv6**; applies **all OS updates**; then **auto-reboots**.
 
-### Server
+### Server — fields
 ```yaml
 apiVersion: rkeprep/v1
 kind: Server
 metadata:
-  name: cluster1-server1
+  name: c1-s1
 spec:
   ip: 10.0.0.10
   prefix: 24
-  hostname: cluster1-server1
+  hostname: c1-s1
   dns: ["10.0.1.34", "10.231.1.34"]
-  searchDomains: ["dev.kube", "dev.local"]
+  searchDomains: ["corp.local", "dev.kube"]
 ```
+**What it does**: performs an offline install using staged artifacts; enables `rke2-server`; sets hostname & static IP (single gateway optional); configures DNS and search domains; **prompts to reboot** (or `-y` to auto-reboot).
 
-### Agent
+### Agent — fields
 ```yaml
 apiVersion: rkeprep/v1
 kind: Agent
 metadata:
-  name: cluster1-agent1
+  name: c1-a1
 spec:
   ip: 10.0.0.11
   prefix: 24
-  hostname: cluster1-agent1
+  hostname: c1-a1
   dns: ["10.0.1.34", "10.231.1.34"]
-  searchDomains: ["dev.kube", "dev.local"]
-  serverURL: https://10.0.0.10:9345
-  token: <cluster-join-token>
+  searchDomains: ["corp.local", "dev.kube"]
+  serverURL: https://10.0.0.10:9345   # optional
+  token: <cluster-join-token>         # optional
 ```
+**What it does**: performs an offline install using staged artifacts; enables `rke2-agent`; sets hostname & static IP; optionally writes `server` and `token` to `/etc/rancher/rke2/config.yaml`; **prompts to reboot** (or `-y`).
 
 ---
 
-## Troubleshooting
+## Logging & Auditing
 
-- YAML kind mismatch (if both `-f` and subcommand provided) → must match.
-- Missing CA → put `kuberegistry-ca.crt` into `./certs/` before `image`.
-- Registry login failed → check DNS/route and credentials.
-- Images not found → run `pull`; check `./downloads/`.
-- Networking not applied → reboot after `server`/`agent` (or use `-y`).
+- **Console + file** logging (RFC 5424-style) to `./logs/rke2nodeinit_<UTC-timestamp>.log`
+- Logs compressed after **60 days**.
+- `push` writes **image manifests** and **SBOMs** under `./outputs/`.
+
+> Tip: Forward the `logs/` directory to your **SIEM** (e.g., Splunk) and index by filename and timestamp.
 
 ---
 
-## Examples
-See `./examples/`: `pull.yaml`, `push.yaml`, `image.yaml`, `server.yaml`, `agent.yaml`.
+## Security notes
+
+- Secrets (`registryPassword`, `token`) are **masked** when printing YAML (`-P` flag).
+- Swap is disabled; nftables-backed iptables is preferred.
+- Registry CA is installed into the system trust store and referenced by `registries.yaml`.
+- Only a **single gateway** is supported (by design for simplicity and determinism).
+
+---
+
+## Troubleshooting & FAQ
+
+**Q: `verify` fails on modules/sysctls.**  
+A: Re-run `image` (or ensure prereqs via `install_rke2_prereqs` are applied), then reboot and re-run `verify`.
+
+**Q: Pushing images fails with authentication errors.**  
+A: Confirm registry, username, and password in the YAML. Ensure CA is present at `certs/kuberegistry-ca.crt` and trusted on the VM (`update-ca-certificates` is run by `image`).
+
+**Q: I don’t see SBOM files.**  
+A: If the `syft` binary is not installed, the script writes an **inspect JSON** fallback instead of SPDX. Install `syft` for SPDX SBOMs.
+
+**Q: Can I specify the RKE2 version?**  
+A: Yes—via `spec.rke2Version` in `pull.yaml` or `-v <version>` on the CLI. Otherwise, the script auto-detects the latest release.
+
+**Q: Why IPv6 is disabled?**  
+A: To reduce complexity in air-gapped environments and avoid dual-stack routing surprises. You can re-enable if desired.
+
+---
+
+## Safety prompts & overrides
+
+- When `-f/--file` is used, **YAML values override** conflicting CLI flags. The script logs a warning and proceeds.
+- `server` and `agent` **prompt** for any missing inputs and **confirm** reboots unless `-y` is given.
+
+---
+
+## Verify checklist (what “good” looks like)
+
+- `verify` shows **OK** for:
+  - modules: `br_netfilter`, `overlay`
+  - sysctl: `bridge-nf-call-iptables=1`, `ip_forward=1`
+  - **swap disabled**
+  - runtime: containerd+nerdctl (preferred) or Docker
+  - artifacts present: images tar, RKE2 tarball, `install.sh` staged
+  - `registries.yaml` and CA cert installed
+
+---
+
+## Uninstall / rollback (manual)
+
+- Remove RKE2 packages and configs (if installed):  
+  `systemctl disable --now rke2-server rke2-agent || true`  
+  `rm -rf /etc/rancher/rke2 /var/lib/rancher/rke2 /var/lib/kubelet`
+- Remove staged artifacts (if desired):  
+  `rm -rf /opt/rke2/stage /var/lib/rancher/rke2/agent/images`
+- Restore swap and sysctl as needed; remove `/etc/modules-load.d/rke2.conf` and `/etc/sysctl.d/90-rke2.conf`; `sysctl --system`
+
+---
+
+## Examples (ready to edit)
+
+The `examples/` folder contains working starting points for each `kind`:
+- `pull.yaml`, `push.yaml`, `image.yaml`, `server.yaml`, `agent.yaml`
+
+Happy clustering! 🚀

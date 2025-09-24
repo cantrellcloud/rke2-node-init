@@ -1,0 +1,10 @@
+apiVersion: rkeprep/v1
+kind: Server
+metadata:
+  name: j64manager-server1
+spec:
+  ip: 10.0.4.101
+  prefix: 24
+  hostname: j64manager-server1
+  dns: ["10.0.1.34", "10.231.1.34"]
+  searchDomains: ["dev.kube", "dev.local"]
