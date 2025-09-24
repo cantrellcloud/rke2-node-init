@@ -1,4 +1,4 @@
-apiVersion: rke2nodeinit/v1
+apiVersion: rkeprep/v1
 kind: Image
 metadata:
   name: offline-prep

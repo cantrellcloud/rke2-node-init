@@ -1,4 +1,4 @@
-apiVersion: rke2nodeinit/v1
+apiVersion: rkeprep/v1
 kind: Server
 metadata:
   name: cluster1-server1
