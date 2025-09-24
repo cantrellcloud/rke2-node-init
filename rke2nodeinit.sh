@@ -1,21 +1,9 @@
 #!/usr/bin/env bash
-# =============================================================================
-# rke2nodeinit.sh  —  RKE2 Air-Gapped Image Prep Utility (Auto-Kind)
-#
-# - Ubuntu 24.04 LTS
-# - Supports: Pull, Push, Image, Server, Agent, Verify
-# - With -f/--file, the subcommand is optional; inferred from YAML 'kind'.
-# - Safe defaults, strong input validation, RFC 5424 logging.
-# - QoL flags: -y/--yes (auto-reboot), -P/--print-config (mask secrets).
-# - 'image' applies OS updates and auto-reboots; stages artifacts to /opt/rke2/stage
-# =============================================================================
-
 set -Eeuo pipefail
 
-# -------------------------------
-# Global paths & logs
-# -------------------------------
-LOG_DIR="$(dirname "$0")/logs"
+# --- Absolute script dir & logs (fixes pushd/popd issues) ---
+SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd -P)"
+LOG_DIR="$SCRIPT_DIR/logs"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/rke2nodeinit_$(date -u +"%Y-%m-%dT%H-%M-%SZ").log"
 
@@ -31,12 +19,10 @@ log() {
 # Archive logs older than 60 days
 find "$LOG_DIR" -type f -name "rke2nodeinit_*.log" -mtime +60 -exec gzip -q {} \; -exec mv {}.gz "$LOG_DIR" \; || true
 
-# Root check
-if [[ $EUID -ne 0 ]]; then echo "ERROR: Please run with sudo/root."; exit 1; fi
+# Root required
+if [[ $EUID -ne 0 ]]; then echo "ERROR: run with sudo/root."; exit 1; fi
 
-# -------------------------------
 # Defaults & flags
-# -------------------------------
 RKE2_VERSION=""
 REGISTRY="kuberegistry.dev.kube/rke2"
 REG_USER="admin"
@@ -47,28 +33,17 @@ DEFAULT_DNS="10.0.1.34,10.231.1.34"
 AUTO_YES=0
 PRINT_CONFIG=0
 
-print_help() {
-  cat <<EOF
+print_help(){ cat <<EOF
 Usage:
-  YAML-driven (no subcommand needed):
-    sudo \$0 -f file.yaml [options]
-
-  Classic (subcommand) mode:
-    sudo \$0 [options] <pull|push|image|server|agent|verify>
+  sudo $0 -f file.yaml [options]       # auto-kind from YAML
+  sudo $0 [options] <pull|push|image|server|agent|verify>
 
 Options:
-  -f <file>   Kubernetes-style YAML (one manifest per file)
-  -v <ver>    RKE2 version (auto-detect if omitted)
-  -r <reg>    Private registry (default: kuberegistry.dev.kube/rke2)
-  -u <user>   Registry username (default: admin)
-  -p <pass>   Registry password (default provided)
-  -y          Assume yes to prompts (auto-reboot on server/agent)
-  -P          Print sanitized YAML config then continue
-  -h          Help
-
-Notes:
-  - With -f, the script infers the action from YAML 'kind': Pull|Push|Image|Server|Agent.
-  - If you pass both -f and a subcommand, they must match (else error).
+  -f <file>  YAML manifest (rkeprep/v1; kind: Pull|Push|Image|Server|Agent)
+  -v <ver>   RKE2 version (auto-detect if omitted)
+  -r/-u/-p   Registry host/user/pass
+  -y         Auto-yes reboot on server/agent
+  -P         Print sanitized YAML (secrets masked)
 EOF
 }
 
@@ -89,12 +64,10 @@ done
 shift $((OPTIND-1))
 CLI_SUB="${1:-}"
 
-# -------------------------------
 # YAML helpers
-# -------------------------------
-yaml_get_kind() { grep -E '^[[:space:]]*kind:[[:space:]]*' "$1" | awk -F: '{print $2}' | xargs; }
-yaml_get_apiversion() { grep -E '^[[:space:]]*apiVersion:[[:space:]]*' "$1" | awk -F: '{print $2}' | xargs; }
-yaml_spec_get() {
+yaml_get_kind(){ grep -E '^[[:space:]]*kind:[[:space:]]*' "$1" | awk -F: '{print $2}' | xargs; }
+yaml_get_api(){ grep -E '^[[:space:]]*apiVersion:[[:space:]]*' "$1" | awk -F: '{print $2}' | xargs; }
+yaml_spec_get(){
   local file="$1" key="$2"
   awk -v k="$key" '
     BEGIN{inSpec=0}
@@ -111,43 +84,27 @@ yaml_spec_get() {
     }
   ' "$file"
 }
-normalize_list_csv() { local v="$1"; v="${v#[}"; v="${v%]}"; v="${v//\"/}"; v="${v//\'/}"; echo "$v" | sed 's/,/ /g' | xargs | sed 's/ /, /g'; }
-sanitize_and_print_yaml() {
-  local file="$1"
-  echo "----- Sanitized YAML (secrets masked) -----"
+normalize_list_csv(){ local v="$1"; v="${v#[}"; v="${v%]}"; v="${v//\"/}"; v="${v//\'/}"; echo "$v" | sed 's/,/ /g' | xargs | sed 's/ /, /g'; }
+sanitize_yaml(){
   sed -E \
     -e 's/(registryPassword:[[:space:]]*)"[^"]*"/\1"********"/' \
     -e 's/(registryPassword:[[:space:]]*)([^"[:space:]].*)/\1"********"/' \
     -e 's/(token:[[:space:]]*)"[^"]*"/\1"********"/' \
     -e 's/(token:[[:space:]]*)([^"[:space:]].*)/\1"********"/' \
-    "$file"
-  echo "------------------------------------------"
+    "$1"
 }
 
-# -------------------------------
-# YAML validation (if provided)
-# -------------------------------
+# Validate YAML (if provided)
 YAML_KIND=""
 if [[ -n "$CONFIG_FILE" ]]; then
-  [[ -f "$CONFIG_FILE" ]] || { log ERROR "YAML file not found: $CONFIG_FILE"; exit 1; }
-  AV="$(yaml_get_apiversion "$CONFIG_FILE" || true)"
+  [[ -f "$CONFIG_FILE" ]] || { log ERROR "YAML not found: $CONFIG_FILE"; exit 1; }
+  API="$(yaml_get_api "$CONFIG_FILE" || true)"
   YAML_KIND="$(yaml_get_kind "$CONFIG_FILE" || true)"
-  [[ "$AV" == "rkeprep/v1" ]] || { log ERROR "Unsupported apiVersion: ${AV:-<missing>} (expected rkeprep/v1)"; exit 1; }
-  if [[ -n "$CLI_SUB" ]]; then
-    case "$(tr '[:lower:]' '[:upper:]' <<< "$CLI_SUB")" in
-      PULL) REQ_KIND="Pull";; PUSH) REQ_KIND="Push";; IMAGE) REQ_KIND="Image";;
-      SERVER) REQ_KIND="Server";; AGENT) REQ_KIND="Agent";; VERIFY) REQ_KIND="";;
-    esac
-    if [[ -n "${REQ_KIND:-}" && "$YAML_KIND" != "$REQ_KIND" ]]; then
-      log ERROR "YAML kind '$YAML_KIND' does not match CLI subcommand '$CLI_SUB' (expected: $REQ_KIND)"; exit 1
-    fi
-  fi
-  [[ "$PRINT_CONFIG" -eq 1 ]] && sanitize_and_print_yaml "$CONFIG_FILE"
+  [[ "$API" == "rkeprep/v1" ]] || { log ERROR "apiVersion must be rkeprep/v1"; exit 1; }
+  [[ "$PRINT_CONFIG" -eq 1 ]] && { echo "----- Sanitized YAML -----"; sanitize_yaml "$CONFIG_FILE"; echo "--------------------------"; }
 fi
 
-# -------------------------------
-# Utilities: packages & validation
-# -------------------------------
+# Utils & validation
 ensure_installed(){ dpkg -s "$1" &>/dev/null || { log INFO "Installing $1"; apt-get update -y && apt-get install -y "$1"; }; }
 valid_ipv4(){ [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1; IFS='.' read -r a b c d <<<"$1"; for n in "$a" "$b" "$c" "$d"; do [[ "$n" -ge 0 && "$n" -le 255 ]] || return 1; done; }
 valid_prefix(){ [[ -z "$1" ]] && return 0; [[ "$1" =~ ^[0-9]{1,2}$ ]] && (( $1>=0 && $1<=32 )); }
@@ -155,26 +112,21 @@ valid_ipv4_or_blank(){ [[ -z "$1" ]] && return 0; valid_ipv4 "$1"; }
 valid_csv_dns(){ [[ -z "$1" ]] && return 0; local s="$(echo "$1" | sed 's/,/ /g')"; for x in $s; do valid_ipv4 "$x" || return 1; done; }
 valid_search_domains_csv(){ [[ -z "$1" ]] && return 0; local s="$(echo "$1" | sed 's/,/ /g')"; for d in $s; do [[ "$d" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$ ]] || return 1; done; }
 
-# -------------------------------
-# Runtime detection & constants
-# -------------------------------
+# Runtime & constants
 RUNTIME=""; ARCH="amd64"
 IMAGES_TAR="rke2-images.linux-$ARCH.tar.zst"
 RKE2_TARBALL="rke2.linux-$ARCH.tar.gz"
 SHA256_FILE="sha256sum-$ARCH.txt"
-
-ensure_containerd_stack(){ ensure_installed containerd; ensure_installed nerdctl; systemctl enable --now containerd; RUNTIME="nerdctl"; }
+ensure_containerd(){ ensure_installed containerd; ensure_installed nerdctl; systemctl enable --now containerd; RUNTIME="nerdctl"; }
 detect_runtime(){
   if command -v nerdctl &>/dev/null && systemctl is-active --quiet containerd; then RUNTIME="nerdctl"
   elif command -v containerd &>/dev/null; then ensure_installed nerdctl; systemctl enable --now containerd; RUNTIME="nerdctl"
   elif command -v docker &>/dev/null; then RUNTIME="docker"
-  else log WARN "No container runtime detected. Installing containerd + nerdctl."; ensure_containerd_stack
+  else log WARN "No runtime; installing containerd+nerdctl"; ensure_containerd
   fi
 }
 
-# -------------------------------
-# Version resolution (pull)
-# -------------------------------
+# Version resolution
 detect_latest_version(){
   if [[ -z "${RKE2_VERSION:-}" ]]; then
     log INFO "Detecting latest RKE2 version..."
@@ -186,14 +138,12 @@ detect_latest_version(){
   fi
 }
 
-# -------------------------------
 # Shared helpers
-# -------------------------------
 write_netplan(){
   local ip="$1" prefix="$2" gw="$3" dns_csv="$4" search_csv="$5"
   local nic; nic="$(ip -o -4 route show to default | awk '{print $5}' || true)"; [[ -z "$nic" ]] && nic="$(ls /sys/class/net | grep -v lo | head -n1)"
   local search_line=""; if [[ -n "$search_csv" ]]; then local csv="$(echo "$search_csv" | sed 's/,/ /g')"; local arr=($csv); local joined="$(printf ', %s' "${arr[@]}")"; joined="${joined:2}"; search_line="      search: [${joined}]"; fi
-  local dns_line="addresses: [${dns_csv:-8.8.8.8}]"; if [[ -n "$dns_csv" ]]; then local dns_csv_sp="$(echo "$dns_csv" | sed 's/,/ /g')"; local d_arr=($dns_csv_sp); local d_join="$(printf ', %s' "${d_arr[@]}")"; d_join="${d_join:2}"; dns_line="addresses: [${d_join}]"; fi
+  local dns_line="addresses: [${dns_csv:-8.8.8.8}]"; if [[ -n "$dns_csv" ]] then local dns_csv_sp="$(echo "$dns_csv" | sed 's/,/ /g')"; local d_arr=($dns_csv_sp); local d_join="$(printf ', %s' "${d_arr[@]}")"; d_join="${d_join:2}"; dns_line="addresses: [${d_join}]"; fi
   cat > /etc/netplan/99-rke-static.yaml <<EOF
 network:
   version: 2
@@ -214,9 +164,7 @@ load_site_defaults(){
   else DEFAULT_SEARCH=""; fi
 }
 
-# -------------------------------
 # Subcommands
-# -------------------------------
 sub_pull(){
   if [[ -n "$CONFIG_FILE" ]]; then
     RKE2_VERSION="${RKE2_VERSION:-$(yaml_spec_get "$CONFIG_FILE" rke2Version || true)}"
@@ -227,14 +175,18 @@ sub_pull(){
   fi
   detect_latest_version
   local BASE_URL="https://github.com/rancher/rke2/releases/download/${RKE2_VERSION//+/%2B}"
-  local IMAGES_URL="$BASE_URL/$IMAGES_TAR"; local TARBALL_URL="$BASE_URL/$RKE2_TARBALL"; local SHA256_URL="$BASE_URL/$SHA256_FILE"; local INSTALL_SCRIPT_URL="https://get.rke2.io"
-  local WORK_DIR="$(dirname "$0")/downloads"; mkdir -p "$WORK_DIR"
-  log INFO "Downloading artifacts for $RKE2_VERSION"; ensure_installed curl; ensure_installed zstd; ensure_installed ca-certificates
+  local WORK_DIR="$SCRIPT_DIR/downloads"; mkdir -p "$WORK_DIR"
+  ensure_installed curl; ensure_installed zstd; ensure_installed ca-certificates
   pushd "$WORK_DIR" >/dev/null
-  curl -Lf "$IMAGES_URL" -o "$IMAGES_TAR"; curl -Lf "$TARBALL_URL" -o "$RKE2_TARBALL"; curl -Lf "$SHA256_URL" -o "$SHA256_FILE"
-  log INFO "Verifying checksums"; grep "$IMAGES_TAR" "$SHA256_FILE" | sha256sum -c -; grep "$RKE2_TARBALL" "$SHA256_FILE" | sha256sum -c -
-  curl -sfL "$INSTALL_SCRIPT_URL" -o install.sh && chmod +x install.sh
-  log INFO "pull: completed (artifacts in $WORK_DIR)"; popd >/dev/null
+  curl -Lf "$BASE_URL/$IMAGES_TAR" -o "$IMAGES_TAR"
+  curl -Lf "$BASE_URL/$RKE2_TARBALL" -o "$RKE2_TARBALL"
+  curl -Lf "$BASE_URL/$SHA256_FILE" -o "$SHA256_FILE"
+  log INFO "Verifying checksums"
+  grep "$IMAGES_TAR" "$SHA256_FILE" | sha256sum -c -
+  grep "$RKE2_TARBALL" "$SHA256_FILE" | sha256sum -c -
+  curl -sfL "https://get.rke2.io" -o install.sh && chmod +x install.sh
+  log INFO "pull: completed (artifacts in $WORK_DIR)"
+  popd >/dev/null
 }
 
 sub_push(){
@@ -245,7 +197,7 @@ sub_push(){
     log WARN "Using YAML values; conflicting CLI flags are overridden."
   fi
   detect_runtime; log INFO "Using runtime: $RUNTIME"; ensure_installed zstd
-  local WORK_DIR="$(dirname "$0")/downloads"; [[ -f "$WORK_DIR/$IMAGES_TAR" ]] || { log ERROR "Images archive not found. Run 'pull' first."; exit 1; }
+  local WORK_DIR="$SCRIPT_DIR/downloads"; [[ -f "$WORK_DIR/$IMAGES_TAR" ]] || { log ERROR "Images archive not found. Run 'pull' first."; exit 1; }
   local REG_HOST="$REGISTRY"; local REG_NS=""; if [[ "$REGISTRY" == *"/"* ]]; then REG_HOST="${REGISTRY%%/*}"; REG_NS="${REGISTRY#*/}"; fi
   if [[ "$RUNTIME" == "nerdctl" ]]; then
     nerdctl login "$REG_HOST" -u "$REG_USER" -p "$REG_PASS" >/dev/null 2>>"$LOG_FILE" || { log ERROR "Registry login failed"; exit 1; }
@@ -265,8 +217,7 @@ sub_push(){
 }
 
 sub_image(){
-  # Ensure OS is patched, stage offline artifacts, write registry trust, disable IPv6, then auto-reboot.
-  local WORK_DIR="$(dirname "$0")/downloads"
+  local WORK_DIR="$SCRIPT_DIR/downloads"
   local REG_HOST="${REGISTRY%%/*}"
   local defaultDnsCsv="$DEFAULT_DNS"
   local defaultSearchCsv=""
@@ -280,26 +231,14 @@ sub_image(){
     log WARN "Using YAML values; conflicting CLI flags are overridden."
   fi
 
-  [[ -f "$(dirname "$0")/certs/kuberegistry-ca.crt" ]] || { log ERROR "Missing certs/kuberegistry-ca.crt"; exit 1; }
-  cp "$(dirname "$0")/certs/kuberegistry-ca.crt" /usr/local/share/ca-certificates/kuberegistry-ca.crt
+  [[ -f "$SCRIPT_DIR/certs/kuberegistry-ca.crt" ]] || { log ERROR "Missing certs/kuberegistry-ca.crt"; exit 1; }
+  cp "$SCRIPT_DIR/certs/kuberegistry-ca.crt" /usr/local/share/ca-certificates/kuberegistry-ca.crt
   update-ca-certificates
 
   mkdir -p /var/lib/rancher/rke2/agent/images/
-  if [[ -f "$WORK_DIR/$IMAGES_TAR" ]]; then
-    cp "$WORK_DIR/$IMAGES_TAR" /var/lib/rancher/rke2/agent/images/ && log INFO "Copied images tar into agent images path"
-  else
-    log WARN "Images tar not found in $WORK_DIR; run 'pull' first."
-  fi
-  if [[ -f "$WORK_DIR/$RKE2_TARBALL" ]]; then
-    cp "$WORK_DIR/$RKE2_TARBALL" "$STAGE_DIR/" && log INFO "Staged $RKE2_TARBALL to $STAGE_DIR"
-  else
-    log WARN "RKE2 tarball not found in $WORK_DIR; run 'pull' first."
-  fi
-  if [[ -f "$WORK_DIR/install.sh" ]]; then
-    cp "$WORK_DIR/install.sh" "$STAGE_DIR/" && chmod +x "$STAGE_DIR/install.sh" && log INFO "Staged install.sh to $STAGE_DIR"
-  else
-    log WARN "install.sh not found in $WORK_DIR; run 'pull' first."
-  fi
+  if [[ -f "$WORK_DIR/$IMAGES_TAR" ]]; then cp "$WORK_DIR/$IMAGES_TAR" /var/lib/rancher/rke2/agent/images/ && log INFO "Copied images tar into agent images path"; else log WARN "Images tar not found in $WORK_DIR; run 'pull' first."; fi
+  if [[ -f "$WORK_DIR/$RKE2_TARBALL" ]]; then cp "$WORK_DIR/$RKE2_TARBALL" "$STAGE_DIR/" && log INFO "Staged $RKE2_TARBALL to $STAGE_DIR"; else log WARN "RKE2 tarball not found in $WORK_DIR; run 'pull' first."; fi
+  if [[ -f "$WORK_DIR/install.sh" ]]; then cp "$WORK_DIR/install.sh" "$STAGE_DIR/" && chmod +x "$STAGE_DIR/install.sh" && log INFO "Staged install.sh to $STAGE_DIR"; else log WARN "install.sh not found in $WORK_DIR; run 'pull' first."; fi
 
   mkdir -p /etc/rancher/rke2/
   printf 'system-default-registry: "%s"\n' "$REG_HOST" > /etc/rancher/rke2/config.yaml
@@ -331,7 +270,6 @@ EOF
   chmod 600 "$STATE"
   log INFO "Saved site defaults: DNS=[$defaultDnsCsv] SEARCH=[$defaultSearchCsv]"
 
-  # OS updates & auto-reboot
   log INFO "Applying all current updates and patches (apt-get update && dist-upgrade) ..."
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -y
@@ -352,18 +290,18 @@ sub_server(){
     local sd="$(yaml_spec_get "$CONFIG_FILE" searchDomains || true)"; [[ -n "$sd" ]] && S_SEARCH="$(normalize_list_csv "$sd")"
   fi
   [[ -n "$S_IP" ]] || read -rp "Enter static IP for this server node: " S_IP
-  [[ -n "$S_PREFIX" ]] || read -rp "Enter subnet prefix length for this server node (0-32) [default 24]: " S_PREFIX
+  [[ -n "$S_PREFIX" ]] || read -rp "Enter subnet prefix length (0-32) [default 24]: " S_PREFIX
   [[ -n "$S_HOST" ]] || read -rp "Enter hostname for this server node: " S_HOST
   read -rp "Enter default gateway IP [leave blank to skip]: " S_GW || true
-  if [[ -z "$S_DNS" ]]; then read -rp "Enter DNS server IP(s) (comma-separated) [leave blank for default ${DEFAULT_DNS}]: " S_DNS || true; [[ -z "$S_DNS" ]] && S_DNS="$DEFAULT_DNS" && log INFO "Using default DNS for server: $S_DNS"; fi
+  if [[ -z "$S_DNS" ]]; then read -rp "Enter DNS IP(s) (comma-separated) [leave blank for default ${DEFAULT_DNS}]: " S_DNS || true; [[ -z "$S_DNS" ]] && S_DNS="$DEFAULT_DNS" && log INFO "Using default DNS for server: $S_DNS"; fi
   if [[ -n "${DEFAULT_SEARCH:-}" && -z "$S_SEARCH" ]]; then S_SEARCH="$DEFAULT_SEARCH"; log INFO "Using default search domains for server: $S_SEARCH"; fi
   while ! valid_ipv4 "$S_IP"; do read -rp "Invalid IPv4. Re-enter server IP: " S_IP; done
   while ! valid_prefix "${S_PREFIX:-}"; do read -rp "Invalid prefix (0-32). Re-enter server prefix [default 24]: " S_PREFIX; done
   while ! valid_ipv4_or_blank "${S_GW:-}"; do read -rp "Invalid gateway IPv4 (or blank). Re-enter: " S_GW; done
-  while ! valid_csv_dns "${S_DNS:-}"; do read -rp "Invalid DNS list. Re-enter comma-separated IPv4s: " S_DNS; done
+  while ! valid_csv_dns "${S_DNS:-}"; do read -rp "Invalid DNS list. Re-enter CSV IPv4s: " S_DNS; done
   while ! valid_search_domains_csv "${S_SEARCH:-}"; do read -rp "Invalid search domain list. Re-enter CSV: " S_SEARCH; done
   [[ -z "${S_PREFIX:-}" ]] && S_PREFIX=24
-  local WORK_DIR="$(dirname "$0")/downloads"; local STAGE_DIR="/opt/rke2/stage"; local SRC="$STAGE_DIR"; [[ -f "$STAGE_DIR/install.sh" ]] || SRC="$WORK_DIR"
+  local WORK_DIR="$SCRIPT_DIR/downloads"; local STAGE_DIR="/opt/rke2/stage"; local SRC="$STAGE_DIR"; [[ -f "$STAGE_DIR/install.sh" ]] || SRC="$WORK_DIR"
   if [[ ! -f "$SRC/install.sh" ]]; then log ERROR "Missing install.sh. Run 'pull' then 'image' first."; exit 1; fi
   pushd "$SRC" >/dev/null; INSTALL_RKE2_ARTIFACT_PATH="$SRC" sh install.sh >/dev/null 2>>"$LOG_FILE"; popd >/dev/null
   systemctl enable rke2-server
@@ -383,20 +321,20 @@ sub_agent(){
     A_URL="$(yaml_spec_get "$CONFIG_FILE" serverURL || true)"; A_TOKEN="$(yaml_spec_get "$CONFIG_FILE" token || true)"
   fi
   [[ -n "$A_IP" ]] || read -rp "Enter static IP for this agent node: " A_IP
-  [[ -n "$A_PREFIX" ]] || read -rp "Enter subnet prefix length for this agent node (0-32) [default 24]: " A_PREFIX
+  [[ -n "$A_PREFIX" ]] || read -rp "Enter subnet prefix length (0-32) [default 24]: " A_PREFIX
   [[ -n "$A_HOST" ]] || read -rp "Enter hostname for this agent node: " A_HOST
   read -rp "Enter default gateway IP [leave blank to skip]: " A_GW || true
-  if [[ -z "$A_DNS" ]]; then read -rp "Enter DNS server IP(s) (comma-separated) [leave blank for default ${DEFAULT_DNS}]: " A_DNS || true; [[ -z "$A_DNS" ]] && A_DNS="$DEFAULT_DNS" && log INFO "Using default DNS for agent: $A_DNS"; fi
+  if [[ -z "$A_DNS" ]]; then read -rp "Enter DNS IP(s) (comma-separated) [leave blank for default ${DEFAULT_DNS}]: " A_DNS || true; [[ -z "$A_DNS" ]] && A_DNS="$DEFAULT_DNS" && log INFO "Using default DNS for agent: $A_DNS"; fi
   if [[ -n "${DEFAULT_SEARCH:-}" && -z "$A_SEARCH" ]]; then A_SEARCH="$DEFAULT_SEARCH"; log INFO "Using default search domains for agent: $A_SEARCH"; fi
   while ! valid_ipv4 "$A_IP"; do read -rp "Invalid IPv4. Re-enter agent IP: " A_IP; done
   while ! valid_prefix "${A_PREFIX:-}"; do read -rp "Invalid prefix (0-32). Re-enter agent prefix [default 24]: " A_PREFIX; done
   while ! valid_ipv4_or_blank "${A_GW:-}"; do read -rp "Invalid gateway IPv4 (or blank). Re-enter: " A_GW; done
-  while ! valid_csv_dns "${A_DNS:-}"; do read -rp "Invalid DNS list. Re-enter comma-separated IPv4s: " A_DNS; done
+  while ! valid_csv_dns "${A_DNS:-}"; do read -rp "Invalid DNS list. Re-enter CSV IPv4s: " A_DNS; done
   while ! valid_search_domains_csv "${A_SEARCH:-}"; do read -rp "Invalid search domain list. Re-enter CSV: " A_SEARCH; done
   [[ -z "${A_PREFIX:-}" ]] && A_PREFIX=24
-  if [[ -z "${A_URL:-}" ]]; then read -rp "Enter RKE2 server URL (e.g., https://<server-ip>:9345) [optional]: " A_URL || true; fi
-  if [[ -n "$A_URL" && -z "${A_TOKEN:-}" ]]; then read -rp "Enter cluster join token [optional]: " A_TOKEN || true; fi
-  local WORK_DIR="$(dirname "$0")/downloads"; local STAGE_DIR="/opt/rke2/stage"; local SRC="$STAGE_DIR"; [[ -f "$STAGE_DIR/install.sh" ]] || SRC="$WORK_DIR"
+  if [[ -z "${A_URL:-}" ]] then read -rp "Enter RKE2 server URL (e.g., https://<server-ip>:9345) [optional]: " A_URL || true; fi
+  if [[ -n "$A_URL" && -z "${A_TOKEN:-}" ]] then read -rp "Enter cluster join token [optional]: " A_TOKEN || true; fi
+  local WORK_DIR="$SCRIPT_DIR/downloads"; local STAGE_DIR="/opt/rke2/stage"; local SRC="$STAGE_DIR"; [[ -f "$STAGE_DIR/install.sh" ]] || SRC="$WORK_DIR"
   if [[ ! -f "$SRC/install.sh" ]]; then log ERROR "Missing install.sh. Run 'pull' then 'image' first."; exit 1; fi
   pushd "$SRC" >/dev/null; INSTALL_RKE2_ARTIFACT_PATH="$SRC" INSTALL_RKE2_TYPE="agent" sh install.sh >/dev/null 2>>"$LOG_FILE"; popd >/dev/null
   systemctl enable rke2-agent
@@ -418,9 +356,9 @@ sub_verify(){
   log INFO "verify: complete"
 }
 
-# -------------------------------
 # Dispatcher
-# -------------------------------
+YAML_KIND=""
+if [[ -n "$CONFIG_FILE" ]]; then YAML_KIND="$(yaml_get_kind "$CONFIG_FILE" || true)"; fi
 ACTION="${CLI_SUB:-}"
 if [[ -n "$CONFIG_FILE" && -z "$CLI_SUB" ]]; then
   case "$YAML_KIND" in
