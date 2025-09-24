@@ -1,0 +1,12 @@
+apiVersion: rke2nodeinit/v1
+kind: Agent
+metadata:
+  name: cluster1-agent1
+spec:
+  ip: 10.0.0.11
+  prefix: 24
+  hostname: cluster1-agent1
+  dns: ["10.0.1.34", "10.231.1.34"]
+  searchDomains: ["corp.local", "dev.kube"]
+  serverURL: https://10.0.0.10:9345
+  token: <cluster-join-token>
