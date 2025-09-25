@@ -442,6 +442,26 @@ gen_sbom_or_metadata() {
   fi
 }
 
+run_rke2_installer() {
+  # Args: $1=<SRC dir>, $2=<type: server|agent|"" >
+  local src="$1" itype="${2:-}"
+  # Honor the installer’s own shebang by executing the file directly.
+  # Capture its rc so 'set -e' doesn’t throw us into the trap.
+  set +e
+  if [[ -n "$itype" ]]; then
+    INSTALL_RKE2_TYPE="$itype" INSTALL_RKE2_ARTIFACT_PATH="$src" "$src/install.sh" >>"$LOG_FILE" 2>&1
+  else
+    INSTALL_RKE2_ARTIFACT_PATH="$src" "$src/install.sh" >>"$LOG_FILE" 2>&1
+  fi
+  local rc=$?
+  set -e
+  if (( rc != 0 )); then
+    log ERROR "RKE2 installer failed (exit $rc). See $LOG_FILE"
+    return "$rc"
+  fi
+  return 0
+}
+
 # ================================================================================================
 # ACTIONS
 # ================================================================================================
@@ -713,10 +733,8 @@ action_server() {
 
   ensure_containerd_ready
   log INFO "Proceeding with offline RKE2 server install..."
-  pushd "$SRC" >/dev/null
-  INSTALL_RKE2_ARTIFACT_PATH="$SRC" sh install.sh >/dev/null 2>>"$LOG_FILE"
-  popd >/dev/null
-
+  run_rke2_installer "$SRC" "server"
+  
   systemctl enable rke2-server
 
   hostnamectl set-hostname "$HOSTNAME"
@@ -782,7 +800,7 @@ action_agent() {
   fi
 
   # Validation
-  while ! valid_ipv4 "$IP"; do read -rp "Invalid IPv4. Re-enter agent IP: " IP; endone=false; done
+  while ! valid_ipv4 "$IP"; do read -rp "Invalid IPv4. Re-enter agent IP: " IP; done
   while ! valid_prefix "${PREFIX:-}"; do read -rp "Invalid prefix (0-32). Re-enter agent prefix [default 24]: " PREFIX; done
   while ! valid_ipv4_or_blank "${GW:-}"; do read -rp "Invalid gateway IPv4 (or blank). Re-enter: " GW; done
   while ! valid_csv_dns "${DNS:-}"; do read -rp "Invalid DNS list. Re-enter CSV IPv4s: " DNS; done
@@ -799,9 +817,7 @@ action_agent() {
 
   ensure_containerd_ready
   log INFO "Proceeding with offline RKE2 agent install..."
-  pushd "$SRC" >/dev/null
-  INSTALL_RKE2_ARTIFACT_PATH="$SRC" INSTALL_RKE2_TYPE="agent" sh install.sh >/dev/null 2>>"$LOG_FILE"
-  popd >/dev/null
+  run_rke2_installer "$SRC" "agent"
 
   systemctl enable rke2-agent
 
