@@ -4,99 +4,86 @@
 if [ -z "${BASH_VERSION:-}" ]; then
   exec /usr/bin/env bash "$0" "$@"
 fi
+
 # Fail fast on CRLF (Windows) endings, which can also trigger odd parse errors
 case "$(head -c 2 "$0" | od -An -t x1 | tr -d ' ')" in
   *0d0a) echo "ERROR: Windows line endings detected. Run: dos2unix '$0'"; exit 2;;
 esac
+
 #
-# rke2nodeinit.sh
+# rke2nodeinit.sh  (containerd-only edition)
 # ----------------------------------------------------
 # Purpose:
-#   Prepare and configure a Linux VM/host (Ubuntu/Debian-based) for an offline/air‑gapped
-#   Rancher RKE2 Kubernetes deployment. This script supports six main actions:
+#   Prepare and configure a Linux VM/host (Ubuntu/Debian-based) for an offline/air-gapped
+#   Rancher RKE2 Kubernetes deployment using **containerd + nerdctl** ONLY.
 #
-#     1) pull   - Download RKE2 artifacts (images + tarball + checksums) on an online host
-#     2) push   - Tag, authenticate, and push preloaded images into a private registry
-#     3) image  - Stage artifacts, registries config, CA certs, and OS prereqs for offline use
-#     4) server - Configure network, hostname, and install rke2-server (offline)
-#     5) agent  - Configure network, hostname, and install rke2-agent  (offline)
-#     6) verify - Check that node prerequisites are in place
+# Actions:
+#   1) pull   - Download RKE2 artifacts (images + tarball + checksums) on an online host
+#   2) push   - Tag and push preloaded images into a private registry (nerdctl only)
+#   3) image  - Stage artifacts, registries config, CA certs, and OS prereqs for offline use
+#   4) server - Configure network/hostname and install rke2-server (offline)
+#   5) agent  - Configure network/hostname and install rke2-agent  (offline)
+#   6) verify - Check that node prerequisites are in place
 #
-#   The workflow usually looks like: pull  -> push -> image -> server/agent -> verify
-#
-# Audience:
-#   This file is intentionally verbose and formatted with generous spacing so that
-#   entry-level admins can read and understand each step.
+# Major changes vs previous:
+#   - Docker support removed end-to-end.
+#   - If Docker is present, we *ask* to uninstall it before proceeding.
+#   - Runtime install uses official "nerdctl-full" bundle (includes containerd, runc, CNI, BuildKit).
+#   - Fixed verify() return code logic so success returns 0.
 #
 # Safety:
-#   - Exits on first error (set -Eeuo pipefail)
-#   - Logs to ./logs/ with timestamps and host info
-#   - Validates IPs, prefixes, DNS lists, and search domain lists
-#   - Avoids leaking secrets in logs
+#   - set -Eeuo pipefail
+#   - global ERR trap emits line number
+#   - root check
+#   - strong input validation for IP/prefix/DNS/search
 #
-# Supported YAML (apiVersion: rkeprep/v1) kinds determine action when using -f <file>:
-#   - kind: Pull   | kind: pull
-#   - kind: Push   | kind: push
-#   - kind: Image  | kind: image
-#   - kind: Server | kind: server
-#   - kind: Agent  | kind: agent
+# YAML (apiVersion: rkeprep/v1) kinds determine action when using -f <file>:
+#   - kind: Pull|pull, Push|push, Image|image, Server|server, Agent|agent
 #
 # Exit codes:
-#   0   success
-#   1   usage error / invalid options
-#   2   missing prerequisites or invalid environment
-#   3   data not found (e.g., missing downloads)
-#   4   runtime/registry auth issues
-#   5   YAML validation/unsupported apiVersion/kind
+#   0 success | 1 usage | 2 missing prerequisites | 3 data missing | 4 registry auth | 5 YAML issues
 # -----------------------------------------------------------------------------------------
 
 set -Eeuo pipefail
-
-# ---------- Global error trap (prints the line number that failed) ------------------------
 trap 'rc=$?; echo "[ERROR] Unexpected failure (exit $rc) at line $LINENO"; exit $rc' ERR
 
-# ---------- Basic locations ---------------------------------------------------------------
+# ---------- Paths -----------------------------------------------------------------------------
 SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd -P)"
 LOG_DIR="$SCRIPT_DIR/logs"
 OUT_DIR="$SCRIPT_DIR/outputs"
 DOWNLOADS_DIR="$SCRIPT_DIR/downloads"
-STAGE_DIR="/opt/rke2/stage"                           # Where artifacts are staged for offline install
-SBOM_DIR="$OUT_DIR/sbom"                              # SBOM or inspect metadata output
+STAGE_DIR="/opt/rke2/stage"
+SBOM_DIR="$OUT_DIR/sbom"
 
 mkdir -p "$LOG_DIR" "$OUT_DIR" "$DOWNLOADS_DIR" "$STAGE_DIR" "$SBOM_DIR"
 
-# ---------- Log file setup ----------------------------------------------------------------
+# ---------- Logging ----------------------------------------------------------------------------
 LOG_FILE="$LOG_DIR/rke2nodeinit_$(date -u +"%Y-%m-%dT%H-%M-%SZ").log"
-
 log() {
-  # Usage: log LEVEL message...
-  # LEVEL: INFO | WARN | ERROR
   local level="$1"; shift
   local msg="$*"
   local ts host
   ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
   host="$(hostname)"
-  # Always echo to console for visibility
   echo "[$level] $msg"
-  # Append to structured log for auditing
   printf "%s %s rke2nodeinit[%d]: %s %s\n" "$ts" "$host" "$$" "$level:" "$msg" >> "$LOG_FILE"
 }
 
-# Rotate/compress logs older than                          60 days
+# Rotate/compress logs older than 60 days
 find "$LOG_DIR" -type f -name "rke2nodeinit_*.log" -mtime +60 -exec gzip -q {} \; -exec mv {}.gz "$LOG_DIR" \; || true
 
-# ---------- Root check --------------------------------------------------------------------
+# ---------- Root check -------------------------------------------------------------------------
 if [[ $EUID -ne 0 ]]; then
   echo "ERROR: please run this script as root (use sudo)."
   exit 1
 fi
 
-# ---------- Defaults and tunables ---------------------------------------------------------
-RKE2_VERSION=""                                       # If empty, we will auto-detect latest from GitHub
-REGISTRY="kuberegistry.dev.kube/rke2"                 # Private registry base (host[/namespace])
-REG_USER="admin"                                      # Private registry username
-REG_PASS="ZAQwsx!@#123"                               # Private registry password (example; change this)
-CONFIG_FILE=""                                        # Optional YAML input (apiVersion: rkeprep/v1)
+# ---------- Defaults & tunables ----------------------------------------------------------------
+RKE2_VERSION=""                                       # auto-detect if empty
+REGISTRY="kuberegistry.dev.kube/rke2"
+REG_USER="admin"
+REG_PASS="ZAQwsx!@#123"
+CONFIG_FILE=""
 ARCH="$(uname -m)"
 case "$ARCH" in
   x86_64) ARCH="amd64";;
@@ -104,20 +91,18 @@ case "$ARCH" in
   *) ARCH="amd64";;
 esac
 
-DEFAULT_DNS="10.0.1.34,10.231.1.34"                   # Default DNS CSV fallback
-AUTO_YES=0                                            # If set (-y), auto-accept reboots where prompted
-PRINT_CONFIG=0                                        # If set (-P), print sanitized YAML to screen
-DRY_PUSH=0                                            # If set (--dry-push), skip actual pushes to registry
+DEFAULT_DNS="10.0.1.34,10.231.1.34"
+AUTO_YES=0                  # -y auto-confirm reboots *and* Docker removal if detected
+PRINT_CONFIG=0              # -P print sanitized YAML
+DRY_PUSH=0                  # --dry-push skips actual registry push
+RUNTIME="nerdctl"           # fixed; Docker removed
 
-# Artifact names based on architecture
+# Artifacts
 IMAGES_TAR="rke2-images.linux-$ARCH.tar.zst"
 RKE2_TARBALL="rke2.linux-$ARCH.tar.gz"
 SHA256_FILE="sha256sum-$ARCH.txt"
 
-# Runtime chosen later (nerdctl/docker), prefer containerd+nerdctl
-RUNTIME=""
-
-# ---------- Usage help --------------------------------------------------------------------
+# ---------- Help --------------------------------------------------------------------------------
 print_help() {
   cat <<'EOF'
 Usage:
@@ -131,30 +116,24 @@ Options:
   -r REG      Private registry (host[/namespace]), e.g., reg.example.org/rke2
   -u USER     Registry username
   -p PASS     Registry password
-  -y          Auto-confirm reboots (non-interactive)
+  -y          Auto-confirm prompts (reboots, Docker removal)
   -P          Print sanitized YAML to screen (masks secrets)
   -h          Show this help
-  --dry-push  Do not actually push images to registry (simulate & create manifest only)
+  --dry-push  Do not actually push images to registry (simulate only)
 EOF
 }
 
-# ---------- Lightweight YAML helpers ------------------------------------------------------
-# Note: These are simple text extractors for "apiVersion:", "kind:", and keys under "spec:".
-# They assume well-formed YAML with those fields present only once at the top level.
+# ---------- Lightweight YAML helpers ------------------------------------------------------------
 yaml_get_api()  { grep -E '^[[:space:]]*apiVersion:[[:space:]]*' "$1" | awk -F: '{print $2}' | xargs; }
 yaml_get_kind() { grep -E '^[[:space:]]*kind:[[:space:]]*'       "$1" | awk -F: '{print $2}' | xargs; }
 
 yaml_spec_get() {
-  # Extract a single key under top-level "spec:" block
-  # Example: yaml_spec_get file.yaml ip
   local file="$1" key="$2"
   awk -v k="$key" '
     BEGIN { inSpec=0 }
     /^[[:space:]]*spec:[[:space:]]*$/ { inSpec=1; next }
     inSpec==1 {
-      # Next top-level key would end spec:, so bail if we see no indent
-      if ($0 ~ /^[^[:space:]]/) { exit }
-      # Match "  key: value"
+      if ($0 ~ /^[^[:space:]]/) { exit }   # left margin => new top-level
       if ($0 ~ "^[[:space:]]+" k "[[:space:]]*:") {
         sub(/^[[:space:]]+/, "", $0)
         sub(k "[[:space:]]*:[[:space:]]*", "", $0)
@@ -167,7 +146,6 @@ yaml_spec_get() {
 }
 
 sanitize_yaml() {
-  # Mask sensitive values like passwords and tokens
   sed -E \
     -e 's/(registryPassword:[[:space:]]*)"[^"]*"/\1"********"/' \
     -e 's/(registryPassword:[[:space:]]*)([^"[:space:]].*)/\1"********"/' \
@@ -177,41 +155,26 @@ sanitize_yaml() {
 }
 
 normalize_list_csv() {
-  # Accepts various list formats (e.g., ["a","b"], 'a, b', or space separated)
-  # Returns a clean, comma+space separated string: "a, b"
   local v="$1"
   v="${v#[}"; v="${v%]}"
   v="${v//\"/}"; v="${v//\'/}"
   echo "$v" | sed 's/,/ /g' | xargs | sed 's/ /, /g'
 }
 
-# ---------- Validators --------------------------------------------------------------------
+# ---------- Validators --------------------------------------------------------------------------
 valid_ipv4() {
-  # Return 0 (true) if IPv4 looks like A.B.C.D with each 0-255
   [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
   IFS='.' read -r a b c d <<<"$1"
-  for n in "$a" "$b" "$c" "$d"; do
-    [[ "$n" -ge 0 && "$n" -le 255 ]] || return 1
-  done
+  for n in "$a" "$b" "$c" "$d"; do [[ "$n" -ge 0 && "$n" -le 255 ]] || return 1; done
 }
-
-valid_prefix() {
-  # Accepts blank (treated elsewhere) or 0..32
-  [[ -z "$1" ]] && return 0
-  [[ "$1" =~ ^[0-9]{1,2}$ ]] && (( $1>=0 && $1<=32 ))
-}
-
+valid_prefix() { [[ -z "$1" ]] && return 0; [[ "$1" =~ ^[0-9]{1,2}$ ]] && (( $1>=0 && $1<=32 )); }
 valid_ipv4_or_blank() { [[ -z "$1" ]] && return 0; valid_ipv4 "$1"; }
-
 valid_csv_dns() {
-  # Comma-separated IPv4s
   [[ -z "$1" ]] && return 0
   local s; s="$(echo "$1" | sed 's/,/ /g')"
   for x in $s; do valid_ipv4 "$x" || return 1; done
 }
-
 valid_search_domains_csv() {
-  # Comma-separated FQDNs (simple check)
   [[ -z "$1" ]] && return 0
   local s; s="$(echo "$1" | sed 's/,/ /g')"
   for d in $s; do
@@ -219,9 +182,8 @@ valid_search_domains_csv() {
   done
 }
 
-# ---------- Package helpers ---------------------------------------------------------------
+# ---------- APT helper --------------------------------------------------------------------------
 ensure_installed() {
-  # Install a single apt package if missing
   local pkg="$1"
   dpkg -s "$pkg" &>/dev/null || {
     log INFO "Installing package: $pkg"
@@ -231,116 +193,112 @@ ensure_installed() {
   }
 }
 
-# ---------- Container runtime helpers -----------------------------------------------------
-install_containerd_pkg() {
-  ensure_installed curl
-  ensure_installed ca-certificates
-  ensure_installed containerd
-  systemctl enable --now containerd
+# ---------- Runtime: enforce containerd + nerdctl (FULL) ----------------------------------------
+ask_remove_docker_if_present() {
+  if command -v docker >/dev/null 2>&1; then
+    log WARN "Docker detected on this host."
+    if [[ "$AUTO_YES" -eq 1 ]]; then
+      reply="y"
+    else
+      read -rp "Remove Docker packages and proceed with containerd+nerdctl? [y/N]: " reply
+    fi
+    if [[ "$reply" =~ ^[Yy]$ ]]; then
+      systemctl stop docker 2>/dev/null || true
+      systemctl disable docker 2>/dev/null || true
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get purge -y docker.io docker-ce docker-ce-cli docker-buildx-plugin docker-compose-plugin moby-engine moby-cli 2>>"$LOG_FILE" || true
+      apt-get autoremove -y || true
+      rm -rf /var/lib/docker /etc/docker 2>>"$LOG_FILE" || true
+      log INFO "Docker removed."
+    else
+      log ERROR "Docker must be removed to proceed (this script is containerd-only)."
+      exit 2
+    fi
+  fi
 }
 
-install_nerdctl_latest() {
-  # Install nerdctl directly from GitHub releases (no extra deps beyond tar)
+install_containerd_nerdctl_full() {
+  # Install containerd + runc + CNI + BuildKit + nerdctl from the official "full" tarball.
+  # This follows vendor guidance: extract to /usr/local, enable containerd, create config with SystemdCgroup=true.
   ensure_installed curl
   ensure_installed ca-certificates
   ensure_installed tar
 
+  # Detect latest nerdctl tag (includes the full bundle)
   local api="https://api.github.com/repos/containerd/nerdctl/releases/latest"
   local tag ver url tmp
-
   tag="$(curl -fsSL "$api" | grep -Po '"tag_name":\s*"\K[^"]+' || true)"
-  if [[ -z "$tag" ]]; then
-    log ERROR "Failed to detect latest nerdctl release tag"
-    exit 2
-  fi
-
+  [[ -z "$tag" ]] && { log ERROR "Failed to detect latest nerdctl release tag"; exit 2; }
   ver="${tag#v}"
-  url="https://github.com/containerd/nerdctl/releases/download/${tag}/nerdctl-${ver}-linux-${ARCH}.tar.gz"
+
+  url="https://github.com/containerd/nerdctl/releases/download/${tag}/nerdctl-full-${ver}-linux-${ARCH}.tar.gz"
   tmp="$(mktemp -d)"
 
-  log INFO "Installing nerdctl ${tag}"
-  curl -fsSL "$url" -o "$tmp/nerdctl.tgz"
-  tar -xzf "$tmp/nerdctl.tgz" -C "$tmp"
-  install -m 0755 "$tmp/nerdctl" /usr/local/bin/nerdctl
+  log INFO "Installing containerd stack via nerdctl FULL bundle: ${tag} (${ARCH})"
+  curl -fsSL "$url" -o "$tmp/nerdctl-full.tgz"
+  tar -C /usr/local -xzf "$tmp/nerdctl-full.tgz"
   rm -rf "$tmp"
 
-  log INFO "nerdctl version: $(/usr/local/bin/nerdctl --version || true)"
+  # Ensure systemd sees the unit files from the bundle (they are placed under /usr/local/lib/systemd/system)
+  systemctl daemon-reload
+
+  # Generate containerd config with systemd cgroup driver
+  mkdir -p /etc/containerd
+  if ! command -v containerd >/dev/null 2>&1; then
+    log ERROR "containerd binary not found after install (unexpected)."
+    exit 2
+  fi
+  containerd config default | tee /etc/containerd/config.toml >/dev/null
+  sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
+
+  # Start containerd
+  systemctl enable --now containerd
+
+  # Confirm nerdctl
+  if ! /usr/local/bin/nerdctl --version >/dev/null 2>&1; then
+    log ERROR "nerdctl not found after install (unexpected)."
+    exit 2
+  fi
+  log INFO "nerdctl installed: $(/usr/local/bin/nerdctl --version)"
 }
 
-ensure_containerd_and_nerdctl() {
-  # Preference order:
-  #   1) Active containerd and nerdctl present
-  #   2) containerd present -> ensure active, then install nerdctl
-  #   3) Install both
-  if systemctl is-active --quiet containerd; then
-    if command -v nerdctl >/dev/null 2>&1; then
-      RUNTIME="nerdctl"
-      return
-    fi
-    install_nerdctl_latest
-    RUNTIME="nerdctl"
-    return
-  fi
+ensure_containerd_ready() {
+  ask_remove_docker_if_present
 
-  if command -v containerd >/dev/null 2>&1; then
-    systemctl enable --now containerd
-    if ! command -v nerdctl >/dev/null 2>&1; then
-      install_nerdctl_latest
-    fi
-    RUNTIME="nerdctl"
-    return
-  fi
-
-  install_containerd_pkg
-  install_nerdctl_latest
-  RUNTIME="nerdctl"
-}
-
-detect_runtime() {
-  # Select a runtime. Prefer containerd+nerdctl; fall back to Docker if present.
-  if command -v nerdctl &>/dev/null && systemctl is-active --quiet containerd; then
-    RUNTIME="nerdctl"
-  elif command -v containerd &>/dev/null; then
-    systemctl enable --now containerd
-    if ! command -v nerdctl &>/dev/null; then
-      install_nerdctl_latest
-    fi
-    RUNTIME="nerdctl"
-  elif command -v docker &>/dev/null; then
-    RUNTIME="docker"
+  # If containerd is running and nerdctl exists, we're good. Otherwise install the FULL bundle.
+  if systemctl is-active --quiet containerd && command -v nerdctl >/dev/null 2>&1; then
+    log INFO "containerd + nerdctl are present and active."
   else
-    log WARN "No supported container runtime detected; installing containerd + nerdctl..."
-    ensure_containerd_and_nerdctl
+    log WARN "containerd + nerdctl not ready; installing the official FULL bundle."
+    install_containerd_nerdctl_full
+  fi
+
+  # Namespace used by Kubernetes
+  if ! nerdctl --namespace k8s.io images >/dev/null 2>&1; then
+    # First call creates namespace storage if missing; not fatal
+    nerdctl --namespace k8s.io images >/dev/null 2>&1 || true
   fi
 }
 
-# ---------- RKE2 version detection --------------------------------------------------------
+# ---------- RKE2 version detection --------------------------------------------------------------
 detect_latest_rke2_version() {
-  # If RKE2_VERSION is empty, query GitHub for latest release tag
   if [[ -z "${RKE2_VERSION:-}" ]]; then
     log INFO "Detecting latest RKE2 version from GitHub..."
     ensure_installed curl
     local j
     j="$(curl -fsSL https://api.github.com/repos/rancher/rke2/releases/latest || true)"
     RKE2_VERSION="$(echo "$j" | grep -Po '"tag_name":\s*"\K[^"]+' || true)"
-    if [[ -z "$RKE2_VERSION" ]]; then
-      log ERROR "Failed to detect latest RKE2 version"
-      exit 2
-    fi
+    [[ -z "$RKE2_VERSION" ]] && { log ERROR "Failed to detect latest RKE2 version"; exit 2; }
     log INFO "Using RKE2 version: $RKE2_VERSION"
   fi
 }
 
-# ---------- Netplan writer (static IPv4 + DNS + search domains) ---------------------------
+# ---------- Netplan writer (static IPv4 + DNS + search domains) --------------------------------
 write_netplan() {
   # Usage: write_netplan IP PREFIX GATEWAY DNS_CSV SEARCH_CSV
-  local ip="$1"
-  local prefix="$2"
-  local gw="${3:-}"
-  local dns_csv="${4:-}"
-  local search_csv="${5:-}"
+  local ip="$1"; local prefix="$2"; local gw="${3:-}"; local dns_csv="${4:-}"; local search_csv="${5:-}"
 
-  # Try to detect the primary NIC
+  # Detect primary NIC
   local nic
   nic="$(ip -o -4 route show to default | awk '{print $5}' || true)"
   [[ -z "$nic" ]] && nic="$(ls /sys/class/net | grep -v lo | head -n1)"
@@ -356,26 +314,20 @@ write_netplan() {
     echo "      addresses: [$ip/${prefix:-24}]"
     [[ -n "$gw" ]] && echo "      gateway4: $gw"
     echo "      nameservers:"
-
-    # DNS servers (defaults to public 8.8.8.8 if none provided)
     if [[ -n "$dns_csv" ]]; then
       local dns_sp arr joined
       dns_sp="$(echo "$dns_csv" | sed 's/,/ /g')"
       read -r -a arr <<<"$dns_sp"
-      joined="$(printf ', %s' "${arr[@]}")"
-      joined="${joined:2}"
+      joined="$(printf ', %s' "${arr[@]}")"; joined="${joined:2}"
       echo "        addresses: [$joined]"
     else
       echo "        addresses: [8.8.8.8]"
     fi
-
-    # Search domains (optional)
     if [[ -n "$search_csv" ]]; then
       local sd_sp arr2 joined2
       sd_sp="$(echo "$search_csv" | sed 's/,/ /g')"
       read -r -a arr2 <<<"$sd_sp"
-      joined2="$(printf ', %s' "${arr2[@]}")"
-      joined2="${joined2:2}"
+      joined2="$(printf ', %s' "${arr2[@]}")"; joined2="${joined2:2}"
       echo "        search: [$joined2]"
     fi
   } >> "$tmp"
@@ -383,7 +335,7 @@ write_netplan() {
   log INFO "Netplan written for $nic (IP=$ip/${prefix:-24}, GW=${gw:-<none>}, DNS=${dns_csv:-<default>}, SEARCH=${search_csv:-<none>})"
 }
 
-# ---------- Site defaults (saved by `image` step) -----------------------------------------
+# ---------- Site defaults -----------------------------------------------------------------------
 load_site_defaults() {
   local STATE="/etc/rke2image.defaults"
   if [[ -f "$STATE" ]]; then
@@ -396,17 +348,15 @@ load_site_defaults() {
   fi
 }
 
-# ---------- OS prereqs for RKE2 -----------------------------------------------------------
+# ---------- OS prereqs --------------------------------------------------------------------------
 install_rke2_prereqs() {
-  log INFO "Installing RKE2 prerequisites (packages, modules, sysctl, swapoff, iptables-nft)"
+  log INFO "Installing RKE2 prereqs (iptables-nft, modules, sysctl, swapoff)"
   export DEBIAN_FRONTEND=noninteractive
-
   apt-get update -y
   apt-get install -y \
     curl ca-certificates iptables nftables ethtool socat conntrack iproute2 \
     ebtables openssl tar gzip zstd jq
 
-  # Ensure iptables alternatives are the nft variants if available
   if update-alternatives --list iptables >/dev/null 2>&1; then
     update-alternatives --set iptables  /usr/sbin/iptables-nft || true
     update-alternatives --set ip6tables /usr/sbin/ip6tables-nft || true
@@ -414,7 +364,6 @@ install_rke2_prereqs() {
     update-alternatives --set ebtables  /usr/sbin/ebtables-nft  || true
   fi
 
-  # Load required kernel modules
   cat >/etc/modules-load.d/rke2.conf <<EOF
 br_netfilter
 overlay
@@ -422,7 +371,6 @@ EOF
   modprobe br_netfilter || true
   modprobe overlay || true
 
-  # Kubernetes sysctls
   cat >/etc/sysctl.d/90-rke2.conf <<EOF
 net.bridge.bridge-nf-call-iptables = 1
 net.bridge.bridge-nf-call-ip6tables = 1
@@ -430,83 +378,73 @@ net.ipv4.ip_forward = 1
 EOF
   sysctl --system >/dev/null 2>>"$LOG_FILE" || true
 
-  # Disable swap (recommended by Kubernetes)
   sed -i.bak '/\sswap\s/s/^/#/g' /etc/fstab || true
   swapoff -a || true
 }
 
 verify_prereqs() {
-  # Perform a series of checks. Returns 0 if all green, 1 otherwise.
-  local ok=1
+  # Return 0 on success; 1 if any check fails.
+  local fail=0
   log INFO "Verifying prerequisites and environment..."
 
   for m in br_netfilter overlay; do
     if lsmod | grep -q "^${m}"; then
       log INFO "Module present: $m"
     else
-      log ERROR "Module missing: $m"
-      ok=0
+      log ERROR "Module missing: $m"; fail=1
     fi
   done
 
-  [[ "$(sysctl -n net.bridge.bridge-nf-call-iptables 2>/dev/null || echo 0)" == "1" ]] || { log ERROR "sysctl bridge-nf-call-iptables != 1"; ok=0; }
-  [[ "$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo 0)" == "1" ]]           || { log ERROR "sysctl ip_forward != 1"; ok=0; }
+  [[ "$(sysctl -n net.bridge.bridge-nf-call-iptables 2>/dev/null || echo 0)" == "1" ]] || { log ERROR "sysctl bridge-nf-call-iptables != 1"; fail=1; }
+  [[ "$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo 0)" == "1"           ]] || { log ERROR "sysctl ip_forward != 1"; fail=1; }
 
-  [[ -z "$(swapon --summary)" ]] && log INFO "Swap is disabled" || { log ERROR "Swap is enabled"; ok=0; }
+  if [[ -z "$(swapon --summary)" ]]; then
+    log INFO "Swap is disabled"
+  else
+    log ERROR "Swap is enabled"; fail=1
+  fi
 
   if command -v nerdctl &>/dev/null && systemctl is-active --quiet containerd; then
     log INFO "Runtime OK: containerd + nerdctl"
-  elif command -v docker &>/dev/null; then
-    log WARN "Docker present (fallback)"
   else
-    log ERROR "No supported container runtime detected"
-    ok=0
+    log ERROR "containerd + nerdctl not ready"; fail=1
   fi
 
-  [[ -f "$SCRIPT_DIR/downloads/$IMAGES_TAR" ]] && log INFO "Found images archive" || log WARN "Images archive missing ($SCRIPT_DIR/downloads)"
-  [[ -f "$SCRIPT_DIR/downloads/$RKE2_TARBALL" ]] && log INFO "Found RKE2 tarball" || log WARN "RKE2 tarball missing ($SCRIPT_DIR/downloads)"
-  [[ -f "$STAGE_DIR/install.sh" ]] && log INFO "Staged installer present" || log WARN "Staged installer missing ($STAGE_DIR)"
-  [[ -f /etc/rancher/rke2/registries.yaml ]] && log INFO "registries.yaml present" || log WARN "registries.yaml missing"
+  [[ -f "$SCRIPT_DIR/downloads/$IMAGES_TAR"     ]] && log INFO "Found images archive"     || log WARN "Images archive missing ($SCRIPT_DIR/downloads)"
+  [[ -f "$SCRIPT_DIR/downloads/$RKE2_TARBALL"   ]] && log INFO "Found RKE2 tarball"       || log WARN "RKE2 tarball missing ($SCRIPT_DIR/downloads)"
+  [[ -f "$STAGE_DIR/install.sh"                 ]] && log INFO "Staged installer present" || log WARN "Staged installer missing ($STAGE_DIR)"
+  [[ -f /etc/rancher/rke2/registries.yaml      ]] && log INFO "registries.yaml present"   || log WARN "registries.yaml missing"
   [[ -f /usr/local/share/ca-certificates/kuberegistry-ca.crt ]] && log INFO "CA installed" || log WARN "CA missing (/usr/local/share/ca-certificates/kuberegistry-ca.crt)"
 
-  return $ok
+  return $fail
 }
 
-# ---------- Optional SBOM / metadata capture ----------------------------------------------
+# ---------- SBOM / metadata (optional) ----------------------------------------------------------
 sanitize_img() { echo "$1" | sed 's#/#_#g; s#:#_#g'; }
 
 gen_inspect_json() {
-  # Fallback metadata if syft is not installed
-  local img="$1" runtime="$2"
-  if [[ "$runtime" == "nerdctl" ]]; then
-    nerdctl -n k8s.io inspect "$img" 2>/dev/null || echo "{}"
-  else
-    docker inspect "$img" 2>/dev/null || echo "{}"
-  fi
+  local img="$1"
+  nerdctl -n k8s.io inspect "$img" 2>/dev/null || echo "{}"
 }
 
 gen_sbom_or_metadata() {
-  # If syft exists, create SPDX SBOM. Otherwise save inspect JSON.
-  local img="$1" runtime="$2" base
+  local img="$1" base
   base="$(sanitize_img "$img")"
-
   if command -v syft &>/dev/null; then
     syft "$img" -o spdx-json > "$SBOM_DIR/${base}.spdx.json" 2>>"$LOG_FILE" || true
     log INFO "SBOM written: $SBOM_DIR/${base}.spdx.json"
   else
-    gen_inspect_json "$img" "$runtime" > "$SBOM_DIR/${base}.inspect.json"
+    gen_inspect_json "$img" > "$SBOM_DIR/${base}.inspect.json"
     log INFO "Inspect metadata written: $SBOM_DIR/${base}.inspect.json"
   fi
 }
 
-# =========================================================================================
+# ================================================================================================
 # ACTIONS
-# =========================================================================================
+# ================================================================================================
 
 action_pull() {
-  # Download artifacts from GitHub and preload images into container runtime.
-  # YAML (if provided) may define:
-  #   spec.rke2Version, spec.registry, spec.registryUsername, spec.registryPassword
+  # Download artifacts; preload images into containerd (nerdctl only).
   if [[ -n "$CONFIG_FILE" ]]; then
     RKE2_VERSION="${RKE2_VERSION:-$(yaml_spec_get "$CONFIG_FILE" rke2Version || true)}"
     REGISTRY="$(yaml_spec_get "$CONFIG_FILE" registry || echo "$REGISTRY")"
@@ -516,9 +454,9 @@ action_pull() {
   fi
 
   detect_latest_rke2_version
+  ensure_containerd_ready
 
   local BASE_URL="https://github.com/rancher/rke2/releases/download/${RKE2_VERSION//+/%2B}"
-
   mkdir -p "$DOWNLOADS_DIR"
   pushd "$DOWNLOADS_DIR" >/dev/null
 
@@ -527,7 +465,7 @@ action_pull() {
   ensure_installed ca-certificates
 
   log INFO "Downloading artifacts (images, tarball, checksums, installer)..."
-  curl -Lf "$BASE_URL/$IMAGES_TAR"  -o "$IMAGES_TAR"
+  curl -Lf "$BASE_URL/$IMAGES_TAR"   -o "$IMAGES_TAR"
   curl -Lf "$BASE_URL/$RKE2_TARBALL" -o "$RKE2_TARBALL"
   curl -Lf "$BASE_URL/$SHA256_FILE"  -o "$SHA256_FILE"
   curl -sfL "https://get.rke2.io"    -o install.sh && chmod +x install.sh
@@ -536,24 +474,15 @@ action_pull() {
   grep "$IMAGES_TAR"  "$SHA256_FILE" | sha256sum -c -
   grep "$RKE2_TARBALL" "$SHA256_FILE" | sha256sum -c -
 
-  detect_runtime
-
-  if [[ "$RUNTIME" == "docker" ]]; then
-    log WARN "Docker runtime detected (containerd not active). Loading via Docker..."
-    zstdcat "$IMAGES_TAR" | docker load
-  else
-    ensure_containerd_and_nerdctl
-    log INFO "Pre-loading images into containerd via nerdctl..."
-    zstdcat "$IMAGES_TAR" | nerdctl -n k8s.io load
-  fi
+  log INFO "Pre-loading images into containerd via nerdctl..."
+  zstdcat "$IMAGES_TAR" | nerdctl -n k8s.io load
 
   popd >/dev/null
   log INFO "pull: completed successfully."
 }
 
 action_push() {
-  # Tag and push all loaded images to the private registry.
-  # Uses REGISTRY/REG_USER/REG_PASS. Requires images to be preloaded (via pull).
+  # Push all loaded images to the private registry using nerdctl (no Docker).
   if [[ -n "$CONFIG_FILE" ]]; then
     REGISTRY="$(yaml_spec_get "$CONFIG_FILE" registry || echo "$REGISTRY")"
     REG_USER="$(yaml_spec_get "$CONFIG_FILE" registryUsername || echo "$REG_USER")"
@@ -561,9 +490,8 @@ action_push() {
     log WARN "Using YAML values; CLI flags may be overridden (push)."
   fi
 
-  detect_runtime
+  ensure_containerd_ready
   ensure_installed zstd
-  [[ "$RUNTIME" != "docker" ]] && ensure_containerd_and_nerdctl
 
   local work="$DOWNLOADS_DIR"
   if [[ ! -f "$work/$IMAGES_TAR" ]]; then
@@ -571,26 +499,18 @@ action_push() {
     exit 3
   fi
 
-  if [[ "$RUNTIME" == "docker" ]]; then
-    zstdcat "$work/$IMAGES_TAR" | docker load
-  else
-    zstdcat "$work/$IMAGES_TAR" | nerdctl -n k8s.io load
-  fi
+  # Ensure images are present inside k8s.io namespace
+  zstdcat "$work/$IMAGES_TAR" | nerdctl -n k8s.io load
 
-  # List unique images
+  # Build image list
   local -a imgs
-  if [[ "$RUNTIME" == "docker" ]]; then
-    mapfile -t imgs < <(docker image ls --format '{{.Repository}}:{{.Tag}}' | grep -v '<none>' | sort -u)
-  else
-    mapfile -t imgs < <(nerdctl -n k8s.io images --format '{{.Repository}}:{{.Tag}}' | grep -v '<none>' | sort -u)
-  fi
+  mapfile -t imgs < <(nerdctl -n k8s.io images --format '{{.Repository}}:{{.Tag}}' | grep -v '<none>' | sort -u)
 
   local REG_HOST="$REGISTRY" REG_NS=""
   [[ "$REGISTRY" == *"/"* ]] && { REG_HOST="${REGISTRY%%/*}"; REG_NS="${REGISTRY#*/}"; }
 
   local manifest_json="$OUT_DIR/images-manifest.json"
   local manifest_txt="$OUT_DIR/images-manifest.txt"
-
   : > "$manifest_txt"
   echo "[" > "$manifest_json"
   local first=1
@@ -598,23 +518,18 @@ action_push() {
   for IMG in "${imgs[@]}"; do
     [[ -z "$IMG" ]] && continue
     local TARGET
-    if [[ -n "$REG_NS" ]]; then
-      TARGET="$REG_HOST/$REG_NS/$IMG"
-    else
-      TARGET="$REG_HOST/$IMG"
-    fi
+    if [[ -n "$REG_NS" ]]; then TARGET="$REG_HOST/$REG_NS/$IMG"; else TARGET="$REG_HOST/$IMG"; fi
 
     [[ $first -eq 0 ]] && echo "," >> "$manifest_json"
     printf '  {"source":"%s","target":"%s"}' "$IMG" "$TARGET" >> "$manifest_json"
     first=0
     echo "$IMG  ->  $TARGET" >> "$manifest_txt"
 
-    gen_sbom_or_metadata "$IMG" "$RUNTIME"
+    gen_sbom_or_metadata "$IMG"
   done
-
   echo ""  >> "$manifest_json"
   echo "]" >> "$manifest_json"
-  log INFO "Pre-push manifest written to:"
+  log INFO "Pre-push manifest written:"
   log INFO "  - $manifest_txt"
   log INFO "  - $manifest_json"
 
@@ -623,45 +538,26 @@ action_push() {
     return 0
   fi
 
-  # Authenticate and push
-  if [[ "$RUNTIME" == "docker" ]]; then
-    ensure_installed docker.io
-    systemctl enable --now docker
-    echo "$REG_PASS" | docker login "$REG_HOST" --username "$REG_USER" --password-stdin 2>>"$LOG_FILE" || {
-      log ERROR "Registry login failed"
-      exit 4
-    }
-    for IMG in "${imgs[@]}"; do
-      [[ -z "$IMG" ]] && continue
-      local TARGET
-      if [[ -n "$REG_NS" ]]; then TARGET="$REG_HOST/$REG_NS/$IMG"; else TARGET="$REG_HOST/$IMG"; fi
-      log INFO "Tag & push: $IMG -> $TARGET"
-      docker tag "$IMG" "$TARGET"
-      docker push "$TARGET"
-    done
-    docker logout "$REG_HOST" || true
-  else
-    nerdctl login "$REG_HOST" -u "$REG_USER" -p "$REG_PASS" >/dev/null 2>>"$LOG_FILE" || {
-      log ERROR "Registry login failed"
-      exit 4
-    }
-    for IMG in "${imgs[@]}"; do
-      [[ -z "$IMG" ]] && continue
-      local TARGET
-      if [[ -n "$REG_NS" ]]; then TARGET="$REG_HOST/$REG_NS/$IMG"; else TARGET="$REG_HOST/$IMG"; fi
-      log INFO "Tag & push: $IMG -> $TARGET"
-      nerdctl -n k8s.io tag "$IMG" "$TARGET"
-      nerdctl -n k8s.io push "$TARGET"
-    done
-    nerdctl logout "$REG_HOST" || true
-  fi
+  # Login and push (nerdctl stores creds in ~/.docker/config.json)
+  nerdctl login "$REG_HOST" -u "$REG_USER" -p "$REG_PASS" >/dev/null 2>>"$LOG_FILE" || {
+    log ERROR "Registry login failed"
+    exit 4
+  }
+  for IMG in "${imgs[@]}"; do
+    [[ -z "$IMG" ]] && continue
+    local TARGET
+    if [[ -n "$REG_NS" ]]; then TARGET="$REG_HOST/$REG_NS/$IMG"; else TARGET="$REG_HOST/$IMG"; fi
+    log INFO "Tag & push: $IMG -> $TARGET"
+    nerdctl -n k8s.io tag  "$IMG" "$TARGET"
+    nerdctl -n k8s.io push "$TARGET"
+  done
+  nerdctl logout "$REG_HOST" || true
 
   log INFO "push: completed successfully."
 }
 
 action_image() {
-  # Prepare the offline image (OS prereqs, CA, registries.yaml, artifacts staged).
-  # YAML (if provided) may define defaults for DNS/search and registry credentials.
+  # Prepare offline image (OS prereqs, CA, registries.yaml, staged artifacts).
   local REG_HOST="${REGISTRY%%/*}"
   local defaultDnsCsv="$DEFAULT_DNS"
   local defaultSearchCsv=""
@@ -682,10 +578,9 @@ action_image() {
   fi
 
   install_rke2_prereqs
-  install_containerd_pkg
-  install_nerdctl_latest
+  ensure_containerd_ready
 
-  # CA certificate required for private registry TLS
+  # Private registry CA
   if [[ ! -f "$SCRIPT_DIR/certs/kuberegistry-ca.crt" ]]; then
     log ERROR "Missing $SCRIPT_DIR/certs/kuberegistry-ca.crt"
     exit 3
@@ -701,14 +596,12 @@ action_image() {
   else
     log WARN "Images archive not found; run 'pull' first."
   fi
-
   if [[ -f "$DOWNLOADS_DIR/$RKE2_TARBALL" ]]; then
     cp "$DOWNLOADS_DIR/$RKE2_TARBALL" "$STAGE_DIR/"
     log INFO "Staged RKE2 tarball"
   else
     log WARN "RKE2 tarball not found; run 'pull' first."
   fi
-
   if [[ -f "$DOWNLOADS_DIR/install.sh" ]]; then
     cp "$DOWNLOADS_DIR/install.sh" "$STAGE_DIR/"
     chmod +x "$STAGE_DIR/install.sh"
@@ -736,15 +629,15 @@ configs:
 EOF
   chmod 600 /etc/rancher/rke2/registries.yaml
 
-  # Optional: disable IPv6 if desired by your environment
-  cat > /etc/sysctl.d/99-disable-ipv6.conf <<EOF
+  # Optional IPv6 disable
+  cat > /etc/sysctl.d/99-disable-ipv6.conf <<'EOF'
 net.ipv6.conf.all.disable_ipv6 = 1
 net.ipv6.conf.default.disable_ipv6 = 1
 EOF
   sysctl --system >/dev/null 2>>"$LOG_FILE" || true
   log INFO "IPv6 disabled via sysctl (99-disable-ipv6.conf)."
 
-  # Save site defaults for later (server/agent prompts)
+  # Save site defaults for later prompts
   local STATE="/etc/rke2image.defaults"
   {
     echo "DEFAULT_DNS=\"$defaultDnsCsv\""
@@ -753,25 +646,23 @@ EOF
   chmod 600 "$STATE"
   log INFO "Saved site defaults: DNS=[$defaultDnsCsv], SEARCH=[$defaultSearchCsv]"
 
-  # Optional: bring OS current and reboot (good idea for golden images)
+  # OS updates (optional but recommended for golden images)
   log INFO "Applying OS updates; the system will reboot automatically..."
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -y
   apt-get -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" dist-upgrade -y
   apt-get autoremove -y || true
-  apt-get autoclean -y  || true
+  apt-get autoclean  -y || true
   log WARN "Rebooting now to complete updates."
   sleep 2
   reboot
 }
 
 action_server() {
-  # Configure a node as an RKE2 server (control-plane)
   load_site_defaults
 
   local IP="" PREFIX="" HOSTNAME="" DNS="" SEARCH="" GW=""
 
-  # Pull values from YAML if present, else prompt
   if [[ -n "$CONFIG_FILE" ]]; then
     IP="$(yaml_spec_get "$CONFIG_FILE" ip || true)"
     PREFIX="$(yaml_spec_get "$CONFIG_FILE" prefix || true)"
@@ -786,22 +677,18 @@ action_server() {
   [[ -n "$PREFIX"  ]] || read -rp "Enter subnet prefix length (0-32) [default 24]: " PREFIX
   [[ -n "$HOSTNAME"]] || read -rp "Enter hostname for this server node: " HOSTNAME
 
-  if [[ -z "${GW:-}" ]]; then
-    read -rp "Enter default gateway IPv4 [leave blank to skip]: " GW || true
-  fi
+  if [[ -z "${GW:-}" ]]; then read -rp "Enter default gateway IPv4 [leave blank to skip]: " GW || true; fi
   log INFO "Gateway entered (server): ${GW:-<none>}"
 
   if [[ -z "$DNS" ]]; then
     read -rp "Enter DNS IPv4s (comma-separated) [blank=default ${DEFAULT_DNS}]: " DNS || true
     [[ -z "$DNS" ]] && DNS="$DEFAULT_DNS" && log INFO "Using default DNS for server: $DNS"
   fi
-
   if [[ -n "${DEFAULT_SEARCH:-}" && -z "$SEARCH" ]]; then
     SEARCH="$DEFAULT_SEARCH"
     log INFO "Using default search domains for server: $SEARCH"
   fi
 
-  # Validation loops
   while ! valid_ipv4 "$IP"; do read -rp "Invalid IPv4. Re-enter server IP: " IP; done
   while ! valid_prefix "${PREFIX:-}"; do read -rp "Invalid prefix (0-32). Re-enter server prefix [default 24]: " PREFIX; done
   while ! valid_ipv4_or_blank "${GW:-}"; do read -rp "Invalid gateway IPv4 (or blank). Re-enter: " GW; done
@@ -809,11 +696,12 @@ action_server() {
   while ! valid_search_domains_csv "${SEARCH:-}"; do read -rp "Invalid search domain list. Re-enter CSV: " SEARCH; done
   [[ -z "${PREFIX:-}" ]] && PREFIX=24
 
-  # Ensure installer is staged (prefer /opt/rke2/stage, fall back to ./downloads)
+  # Ensure installer staged
   local SRC="$STAGE_DIR"
   [[ -f "$STAGE_DIR/install.sh" ]] || SRC="$DOWNLOADS_DIR"
   [[ -f "$SRC/install.sh" ]] || { log ERROR "Missing install.sh. Run 'pull' then 'image' first."; exit 3; }
 
+  ensure_containerd_ready
   log INFO "Proceeding with offline RKE2 server install..."
   pushd "$SRC" >/dev/null
   INSTALL_RKE2_ARTIFACT_PATH="$SRC" sh install.sh >/dev/null 2>>"$LOG_FILE"
@@ -828,21 +716,15 @@ action_server() {
   echo "A reboot is required to apply network changes."
 
   if [[ "$AUTO_YES" -eq 1 ]]; then
-    log INFO "Auto-yes enabled: rebooting now."
+    log INFO "Auto-yes: rebooting now."
     reboot
   fi
-
   read -rp "Reboot now? [y/N]: " confirm
-  if [[ "$confirm" =~ ^[Yy]$ ]]; then
-    log INFO "Rebooting..."
-    reboot
-  else
-    log WARN "Reboot deferred. Please reboot before using this node."
-  fi
+  if [[ "$confirm" =~ ^[Yy]$ ]]; then log INFO "Rebooting..."; reboot
+  else log WARN "Reboot deferred. Please reboot before using this node."; fi
 }
 
 action_agent() {
-  # Configure a node as an RKE2 agent (worker)
   load_site_defaults
 
   local IP="" PREFIX="" HOSTNAME="" DNS="" SEARCH="" GW="" URL="" TOKEN=""
@@ -863,29 +745,21 @@ action_agent() {
   [[ -n "$PREFIX"  ]] || read -rp "Enter subnet prefix length (0-32) [default 24]: " PREFIX
   [[ -n "$HOSTNAME"]] || read -rp "Enter hostname for this agent node: " HOSTNAME
 
-  if [[ -z "${GW:-}" ]]; then
-    read -rp "Enter default gateway IPv4 [leave blank to skip]: " GW || true
-  fi
+  if [[ -z "${GW:-}" ]]; then read -rp "Enter default gateway IPv4 [leave blank to skip]: " GW || true; fi
   log INFO "Gateway entered (agent): ${GW:-<none>}"
 
   if [[ -z "$DNS" ]]; then
     read -rp "Enter DNS IPv4s (comma-separated) [blank=default ${DEFAULT_DNS}]: " DNS || true
     [[ -z "$DNS" ]] && DNS="$DEFAULT_DNS" && log INFO "Using default DNS for agent: $DNS"
   fi
-
   if [[ -n "${DEFAULT_SEARCH:-}" && -z "$SEARCH" ]]; then
     SEARCH="$DEFAULT_SEARCH"
     log INFO "Using default search domains for agent: $SEARCH"
   fi
 
-  if [[ -z "${URL:-}" ]]; then
-    read -rp "Enter RKE2 server URL (e.g., https://<server-ip>:9345) [optional]: " URL || true
-  fi
-  if [[ -n "$URL" && -z "${TOKEN:-}" ]]; then
-    read -rp "Enter cluster join token [optional]: " TOKEN || true
-  fi
+  if [[ -z "${URL:-}" ]]; then read -rp "Enter RKE2 server URL (e.g., https://<server-ip>:9345) [optional]: " URL || true; fi
+  if [[ -n "$URL" && -z "${TOKEN:-}" ]]; then read -rp "Enter cluster join token [optional]: " TOKEN || true; fi
 
-  # Validation loops
   while ! valid_ipv4 "$IP"; do read -rp "Invalid IPv4. Re-enter agent IP: " IP; done
   while ! valid_prefix "${PREFIX:-}"; do read -rp "Invalid prefix (0-32). Re-enter agent prefix [default 24]: " PREFIX; done
   while ! valid_ipv4_or_blank "${GW:-}"; do read -rp "Invalid gateway IPv4 (or blank). Re-enter: " GW; done
@@ -893,11 +767,11 @@ action_agent() {
   while ! valid_search_domains_csv "${SEARCH:-}"; do read -rp "Invalid search domain list. Re-enter CSV: " SEARCH; done
   [[ -z "${PREFIX:-}" ]] && PREFIX=24
 
-  # Ensure installer is staged
   local SRC="$STAGE_DIR"
   [[ -f "$STAGE_DIR/install.sh" ]] || SRC="$DOWNLOADS_DIR"
   [[ -f "$SRC/install.sh" ]] || { log ERROR "Missing install.sh. Run 'pull' then 'image' first."; exit 3; }
 
+  ensure_containerd_ready
   log INFO "Proceeding with offline RKE2 agent install..."
   pushd "$SRC" >/dev/null
   INSTALL_RKE2_ARTIFACT_PATH="$SRC" INSTALL_RKE2_TYPE="agent" sh install.sh >/dev/null 2>>"$LOG_FILE"
@@ -905,10 +779,9 @@ action_agent() {
 
   systemctl enable rke2-agent
 
-  # Append server URL/token to RKE2 config if provided
   mkdir -p /etc/rancher/rke2
-  if [[ -n "${URL:-}" ]]; then echo "server: \"$URL\"" >> /etc/rancher/rke2/config.yaml; fi
-  if [[ -n "${TOKEN:-}" ]]; then echo "token: \"$TOKEN\""   >> /etc/rancher/rke2/config.yaml; fi
+  [[ -n "${URL:-}"   ]] && echo "server: \"$URL\"" >> /etc/rancher/rke2/config.yaml
+  [[ -n "${TOKEN:-}" ]] && echo "token: \"$TOKEN\"" >> /etc/rancher/rke2/config.yaml
 
   hostnamectl set-hostname "$HOSTNAME"
   grep -q "$HOSTNAME" /etc/hosts || echo "$IP $HOSTNAME" >> /etc/hosts
@@ -917,17 +790,12 @@ action_agent() {
   echo "A reboot is required to apply network changes."
 
   if [[ "$AUTO_YES" -eq 1 ]]; then
-    log INFO "Auto-yes enabled: rebooting now."
+    log INFO "Auto-yes: rebooting now."
     reboot
   fi
-
   read -rp "Reboot now? [y/N]: " confirm
-  if [[ "$confirm" =~ ^[Yy]$ ]]; then
-    log INFO "Rebooting..."
-    reboot
-  else
-    log WARN "Reboot deferred. Please reboot before using this node."
-  fi
+  if [[ "$confirm" =~ ^[Yy]$ ]]; then log INFO "Rebooting..."; reboot
+  else log WARN "Reboot deferred. Please reboot before using this node."; fi
 }
 
 action_verify() {
@@ -940,11 +808,9 @@ action_verify() {
   fi
 }
 
-# =========================================================================================
+# ================================================================================================
 # ARGUMENT PARSING
-# =========================================================================================
-
-# Pre-scan to catch the lone --dry-push flag early (so getopts doesn't choke)
+# ================================================================================================
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-push) DRY_PUSH=1; shift;;
@@ -953,7 +819,6 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# getopts for short flags
 while getopts ":f:v:r:u:p:yPh" opt; do
   case ${opt} in
     f) CONFIG_FILE="$OPTARG";;
@@ -970,28 +835,21 @@ while getopts ":f:v:r:u:p:yPh" opt; do
 done
 shift $((OPTIND-1))
 
-# If the remaining argument is a file, treat it as -f FILE
 CLI_SUB="${1:-}"
 if [[ -z "$CONFIG_FILE" && -n "$CLI_SUB" && -f "$CLI_SUB" ]]; then
-  CONFIG_FILE="$CLI_SUB"
-  CLI_SUB=""
+  CONFIG_FILE="$CLI_SUB"; CLI_SUB=""
 fi
 
-# If a YAML file is provided, validate and optionally print a sanitized view
 YAML_KIND=""
 if [[ -n "$CONFIG_FILE" ]]; then
   if [[ ! -f "$CONFIG_FILE" ]]; then
-    log ERROR "YAML file not found: $CONFIG_FILE"
-    exit 5
+    log ERROR "YAML file not found: $CONFIG_FILE"; exit 5
   fi
   API="$(yaml_get_api "$CONFIG_FILE" || true)"
   YAML_KIND="$(yaml_get_kind "$CONFIG_FILE" || true)"
-
   if [[ "$API" != "rkeprep/v1" ]]; then
-    log ERROR "Unsupported apiVersion: '$API' (expected rkeprep/v1)"
-    exit 5
+    log ERROR "Unsupported apiVersion: '$API' (expected rkeprep/v1)"; exit 5
   fi
-
   if [[ "$PRINT_CONFIG" -eq 1 ]]; then
     echo "----- Sanitized YAML -----"
     sanitize_yaml "$CONFIG_FILE"
@@ -999,25 +857,18 @@ if [[ -n "$CONFIG_FILE" ]]; then
   fi
 fi
 
-# =========================================================================================
-# ROUTER
-# =========================================================================================
-
 ACTION="${CLI_SUB:-}"
-
-# If a YAML was provided without a CLI action, infer from kind:
 if [[ -n "$CONFIG_FILE" && -z "$CLI_SUB" ]]; then
   case "$YAML_KIND" in
-    Pull|pull)   ACTION="pull"   ;;
-    Push|push)   ACTION="push"   ;;
-    Image|image) ACTION="image"  ;;
-    Server|server) ACTION="server";;
-    Agent|agent) ACTION="agent"  ;;
+    Pull|pull)     ACTION="pull"   ;;
+    Push|push)     ACTION="push"   ;;
+    Image|image)   ACTION="image"  ;;
+    Server|server) ACTION="server" ;;
+    Agent|agent)   ACTION="agent"  ;;
     *) log ERROR "Unsupported or missing YAML kind: '${YAML_KIND:-<none>}'"; exit 5;;
   esac
 fi
 
-# Dispatch
 case "${ACTION:-}" in
   pull)   action_pull   ;;
   push)   action_push   ;;
