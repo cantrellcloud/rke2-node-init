@@ -462,10 +462,55 @@ run_rke2_installer() {
   return 0
 }
 
+ensure_staged_artifacts() {
+  # Make sure install.sh, RKE2 tarball, and SHA256 file are present in STAGE_DIR.
+  # If missing but available in DOWNLOADS_DIR, copy them in.
+  local missing=0
+
+  # install.sh
+  if [[ ! -f "$STAGE_DIR/install.sh" ]]; then
+    if [[ -f "$DOWNLOADS_DIR/install.sh" ]]; then
+      cp "$DOWNLOADS_DIR/install.sh" "$STAGE_DIR/" && chmod +x "$STAGE_DIR/install.sh"
+      log INFO "Staged install.sh"
+    else
+      log ERROR "Missing install.sh. Run 'pull' first."
+      missing=1
+    fi
+  fi
+
+  # RKE2 tarball
+  if [[ ! -f "$STAGE_DIR/$RKE2_TARBALL" ]]; then
+    if [[ -f "$DOWNLOADS_DIR/$RKE2_TARBALL" ]]; then
+      cp "$DOWNLOADS_DIR/$RKE2_TARBALL" "$STAGE_DIR/"
+      log INFO "Staged RKE2 tarball"
+    else
+      log ERROR "Missing $RKE2_TARBALL. Run 'pull' first."
+      missing=1
+    fi
+  fi
+
+  # SHA256 file
+  if [[ ! -f "$STAGE_DIR/$SHA256_FILE" ]]; then
+    if [[ -f "$DOWNLOADS_DIR/$SHA256_FILE" ]]; then
+      cp "$DOWNLOADS_DIR/$SHA256_FILE" "$STAGE_DIR/"
+      log INFO "Staged SHA256 file"
+    else
+      log ERROR "Missing $SHA256_FILE. Run 'pull' first."
+      missing=1
+    fi
+  fi
+
+  if (( missing != 0 )); then
+    exit 3
+  fi
+}
+
 # ================================================================================================
 # ACTIONS
 # ================================================================================================
 
+# =============
+# Action: PULL
 action_pull() {
   # Download artifacts; preload images into containerd (nerdctl only).
   if [[ -n "$CONFIG_FILE" ]]; then
@@ -504,6 +549,8 @@ action_pull() {
   log INFO "pull: completed successfully."
 }
 
+# =============
+# Action: PUSH
 action_push() {
   # Push all loaded images to the private registry using nerdctl (no Docker).
   if [[ -n "$CONFIG_FILE" ]]; then
@@ -579,6 +626,8 @@ action_push() {
   log INFO "push: completed successfully."
 }
 
+# ==============
+# Action: IMAGE
 action_image() {
   # Prepare offline image (OS prereqs, CA, registries.yaml, staged artifacts).
   local REG_HOST="${REGISTRY%%/*}"
@@ -632,6 +681,12 @@ action_image() {
   else
     log WARN "install.sh not found; run 'pull' first."
   fi
+  if [[ -f "$DOWNLOADS_DIR/$SHA256_FILE" ]]; then
+    cp "$DOWNLOADS_DIR/$SHA256_FILE" "$STAGE_DIR/"
+    log INFO "Staged SHA256 file"
+  else
+    log WARN "SHA256 file not found; run 'pull' first."
+  fi
 
   # rke2 config and registries
   mkdir -p /etc/rancher/rke2/
@@ -677,10 +732,12 @@ EOF
   apt-get autoremove -y || true
   apt-get autoclean  -y || true
   log WARN "Rebooting now to complete updates."
-  sleep 2
+  sleep 10
   reboot
 }
 
+# ==============
+# Action: SERVER
 action_server() {
   # Configure a node as an RKE2 server (control-plane)
   load_site_defaults
@@ -723,13 +780,10 @@ action_server() {
   while ! valid_search_domains_csv "${SEARCH:-}"; do read -rp "Invalid search domain list. Re-enter CSV: " SEARCH; done
   if [[ -z "${PREFIX:-}" ]]; then PREFIX=24; fi
 
-  # Ensure installer is staged
+  # Ensure required artifacts are staged (install.sh, tarball, sha256)
+  log INFO "Ensuring staged artifacts for offline RKE2 server install..."
+  ensure_staged_artifacts
   local SRC="$STAGE_DIR"
-  if [[ ! -f "$STAGE_DIR/install.sh" ]]; then SRC="$DOWNLOADS_DIR"; fi
-  if [[ ! -f "$SRC/install.sh" ]]; then
-    log ERROR "Missing install.sh. Run 'pull' then 'image' first."
-    exit 3
-  fi
 
   ensure_containerd_ready
   log INFO "Proceeding with offline RKE2 server install..."
@@ -755,6 +809,8 @@ action_server() {
   esac
 }
 
+# =============
+# Action: AGENT
 action_agent() {
   # Configure a node as an RKE2 agent (worker)
   load_site_defaults
@@ -807,13 +863,10 @@ action_agent() {
   while ! valid_search_domains_csv "${SEARCH:-}"; do read -rp "Invalid search domain list. Re-enter CSV: " SEARCH; done
   if [[ -z "${PREFIX:-}" ]]; then PREFIX=24; fi
 
-  # Ensure installer is staged
+  # Ensure required artifacts are staged (install.sh, tarball, sha256)
+  log INFO "Ensuring staged artifacts for offline RKE2 agent install..."
+  ensure_staged_artifacts
   local SRC="$STAGE_DIR"
-  if [[ ! -f "$STAGE_DIR/install.sh" ]]; then SRC="$DOWNLOADS_DIR"; fi
-  if [[ ! -f "$SRC/install.sh" ]]; then
-    log ERROR "Missing install.sh. Run 'pull' then 'image' first."
-    exit 3
-  fi
 
   ensure_containerd_ready
   log INFO "Proceeding with offline RKE2 agent install..."
@@ -844,6 +897,8 @@ action_agent() {
   esac
 }
 
+# ===============
+# Action: VERIFY
 action_verify() {
   if verify_prereqs; then
     log INFO "VERIFY PASSED: Node meets RKE2 prerequisites."
