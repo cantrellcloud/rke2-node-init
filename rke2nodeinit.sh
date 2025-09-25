@@ -202,7 +202,8 @@ ask_remove_docker_if_present() {
     else
       read -rp "Remove Docker packages and proceed with containerd+nerdctl? [y/N]: " reply
     fi
-    if [[ "$reply" =~ ^[Yy]$ ]]; then
+    case "$reply" in
+      [Yy])
       systemctl stop docker 2>/dev/null || true
       systemctl disable docker 2>/dev/null || true
       export DEBIAN_FRONTEND=noninteractive
@@ -210,10 +211,12 @@ ask_remove_docker_if_present() {
       apt-get autoremove -y || true
       rm -rf /var/lib/docker /etc/docker 2>>"$LOG_FILE" || true
       log INFO "Docker removed."
-    else
-      log ERROR "Docker must be removed to proceed (this script is containerd-only)."
-      exit 2
-    fi
+      ;;
+      *)
+        log ERROR "Docker must be removed to proceed (this script is containerd-only)."
+        exit 2
+      ;;
+    esac
   fi
 }
 
@@ -720,8 +723,10 @@ action_server() {
     reboot
   fi
   read -rp "Reboot now? [y/N]: " confirm
-  if [[ "$confirm" =~ ^[Yy]$ ]]; then log INFO "Rebooting..."; reboot
-  else log WARN "Reboot deferred. Please reboot before using this node."; fi
+  case "$confirm" in
+    [Yy]) log INFO "Rebooting..."; reboot ;;
+    *)    log WARN "Reboot deferred. Please reboot before using this node." ;;
+  esac
 }
 
 action_agent() {
@@ -794,8 +799,10 @@ action_agent() {
     reboot
   fi
   read -rp "Reboot now? [y/N]: " confirm
-  if [[ "$confirm" =~ ^[Yy]$ ]]; then log INFO "Rebooting..."; reboot
-  else log WARN "Reboot deferred. Please reboot before using this node."; fi
+  case "$confirm" in
+    [Yy]) log INFO "Rebooting..."; reboot ;;
+    *)    log WARN "Reboot deferred. Please reboot before using this node." ;;
+  esac
 }
 
 action_verify() {
