@@ -605,6 +605,7 @@ action_pull() {
 
   ensure_installed curl
   ensure_installed zstd
+  ensure_installed yq
   ensure_installed ca-certificates
 
   log INFO "Downloading artifacts (images, tarball, checksums, installer)..."
