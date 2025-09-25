@@ -1,0 +1,13 @@
+apiVersion: rkeprep/v1
+kind: Agent
+metadata:
+  name: j64manager-worker3
+spec:
+  ip: 10.0.4.106
+  prefix: 24
+  gateway: 10.0.4.1
+  hostname: j64manager-worker3
+  dns: ["10.0.1.34", "10.231.1.34"]
+  searchDomains: ["dev.kube", "dev.local"]
+  serverURL: https://10.0.4.101:9345
+  token: K10df4d29fb3afc4b3cbe609958a68ce09b97290e0deec682eedd478d815e20f53c::server:2656678c7128e9e857ba4df47bd2dcee
