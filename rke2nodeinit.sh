@@ -662,47 +662,54 @@ EOF
 }
 
 action_server() {
+  # Configure a node as an RKE2 server (control-plane)
   load_site_defaults
 
   local IP="" PREFIX="" HOSTNAME="" DNS="" SEARCH="" GW=""
 
+  # YAML values (optional)
   if [[ -n "$CONFIG_FILE" ]]; then
     IP="$(yaml_spec_get "$CONFIG_FILE" ip || true)"
     PREFIX="$(yaml_spec_get "$CONFIG_FILE" prefix || true)"
     HOSTNAME="$(yaml_spec_get "$CONFIG_FILE" hostname || true)"
     local d sd
-    d="$(yaml_spec_get "$CONFIG_FILE" dns || true)"; [[ -n "$d" ]] && DNS="$(normalize_list_csv "$d")"
-    sd="$(yaml_spec_get "$CONFIG_FILE" searchDomains || true)"; [[ -n "$sd" ]] && SEARCH="$(normalize_list_csv "$sd")"
+    d="$(yaml_spec_get "$CONFIG_FILE" dns || true)"; if [[ -n "$d" ]]; then DNS="$(normalize_list_csv "$d")"; fi
+    sd="$(yaml_spec_get "$CONFIG_FILE" searchDomains || true)"; if [[ -n "$sd" ]]; then SEARCH="$(normalize_list_csv "$sd")"; fi
     GW="$(yaml_spec_get "$CONFIG_FILE" gateway || true)"
   fi
 
-  [[ -n "$IP"      ]] || read -rp "Enter static IPv4 for this server node: " IP
-  [[ -n "$PREFIX"  ]] || read -rp "Enter subnet prefix length (0-32) [default 24]: " PREFIX
-  [[ -n "$HOSTNAME"]] || read -rp "Enter hostname for this server node: " HOSTNAME
-
-  if [[ -z "${GW:-}" ]]; then read -rp "Enter default gateway IPv4 [leave blank to skip]: " GW || true; fi
+  # Prompts
+  if [[ -z "$IP" ]];      then read -rp "Enter static IPv4 for this server node: " IP; fi
+  if [[ -z "$PREFIX" ]];  then read -rp "Enter subnet prefix length (0-32) [default 24]: " PREFIX; fi
+  if [[ -z "$HOSTNAME" ]];then read -rp "Enter hostname for this server node: " HOSTNAME; fi
+  if [[ -z "$GW" ]];      then read -rp "Enter default gateway IPv4 [leave blank to skip]: " GW || true; fi
   log INFO "Gateway entered (server): ${GW:-<none>}"
 
   if [[ -z "$DNS" ]]; then
     read -rp "Enter DNS IPv4s (comma-separated) [blank=default ${DEFAULT_DNS}]: " DNS || true
-    [[ -z "$DNS" ]] && DNS="$DEFAULT_DNS" && log INFO "Using default DNS for server: $DNS"
+    if [[ -z "$DNS" ]]; then DNS="$DEFAULT_DNS"; log INFO "Using default DNS for server: $DNS"; fi
   fi
-  if [[ -n "${DEFAULT_SEARCH:-}" && -z "$SEARCH" ]]; then
+
+  if [[ -z "$SEARCH" && -n "${DEFAULT_SEARCH:-}" ]]; then
     SEARCH="$DEFAULT_SEARCH"
     log INFO "Using default search domains for server: $SEARCH"
   fi
 
+  # Validation (single-condition tests only)
   while ! valid_ipv4 "$IP"; do read -rp "Invalid IPv4. Re-enter server IP: " IP; done
   while ! valid_prefix "${PREFIX:-}"; do read -rp "Invalid prefix (0-32). Re-enter server prefix [default 24]: " PREFIX; done
   while ! valid_ipv4_or_blank "${GW:-}"; do read -rp "Invalid gateway IPv4 (or blank). Re-enter: " GW; done
   while ! valid_csv_dns "${DNS:-}"; do read -rp "Invalid DNS list. Re-enter CSV IPv4s: " DNS; done
   while ! valid_search_domains_csv "${SEARCH:-}"; do read -rp "Invalid search domain list. Re-enter CSV: " SEARCH; done
-  [[ -z "${PREFIX:-}" ]] && PREFIX=24
+  if [[ -z "${PREFIX:-}" ]]; then PREFIX=24; fi
 
-  # Ensure installer staged
+  # Ensure installer is staged
   local SRC="$STAGE_DIR"
-  [[ -f "$STAGE_DIR/install.sh" ]] || SRC="$DOWNLOADS_DIR"
-  [[ -f "$SRC/install.sh" ]] || { log ERROR "Missing install.sh. Run 'pull' then 'image' first."; exit 3; }
+  if [[ ! -f "$STAGE_DIR/install.sh" ]]; then SRC="$DOWNLOADS_DIR"; fi
+  if [[ ! -f "$SRC/install.sh" ]]; then
+    log ERROR "Missing install.sh. Run 'pull' then 'image' first."
+    exit 3
+  fi
 
   ensure_containerd_ready
   log INFO "Proceeding with offline RKE2 server install..."
@@ -713,7 +720,7 @@ action_server() {
   systemctl enable rke2-server
 
   hostnamectl set-hostname "$HOSTNAME"
-  grep -q "$HOSTNAME" /etc/hosts || echo "$IP $HOSTNAME" >> /etc/hosts
+  if ! grep -q "$HOSTNAME" /etc/hosts; then echo "$IP $HOSTNAME" >> /etc/hosts; fi
 
   write_netplan "$IP" "$PREFIX" "${GW:-}" "${DNS:-}" "${SEARCH:-}"
   echo "A reboot is required to apply network changes."
@@ -722,59 +729,73 @@ action_server() {
     log INFO "Auto-yes: rebooting now."
     reboot
   fi
+
   read -rp "Reboot now? [y/N]: " confirm
   case "$confirm" in
-    [Yy]) log INFO "Rebooting..."; reboot ;;
-    *)    log WARN "Reboot deferred. Please reboot before using this node." ;;
+    Y|y) log INFO "Rebooting..."; reboot ;;
+    *)   log WARN "Reboot deferred. Please reboot before using this node." ;;
   esac
 }
 
 action_agent() {
+  # Configure a node as an RKE2 agent (worker)
   load_site_defaults
 
-  local IP="" PREFIX="" HOSTNAME="" DNS="" SEARCH="" GW="" URL="" TOKEN=""
+  local IP="" PREFIX="" HOSTNAME="" DNS="" SEARCH="" GW=""
+  local URL="" TOKEN=""
 
+  # YAML values (optional)
   if [[ -n "$CONFIG_FILE" ]]; then
     IP="$(yaml_spec_get "$CONFIG_FILE" ip || true)"
     PREFIX="$(yaml_spec_get "$CONFIG_FILE" prefix || true)"
     HOSTNAME="$(yaml_spec_get "$CONFIG_FILE" hostname || true)"
     local d sd
-    d="$(yaml_spec_get "$CONFIG_FILE" dns || true)"; [[ -n "$d" ]] && DNS="$(normalize_list_csv "$d")"
-    sd="$(yaml_spec_get "$CONFIG_FILE" searchDomains || true)"; [[ -n "$sd" ]] && SEARCH="$(normalize_list_csv "$sd")"
+    d="$(yaml_spec_get "$CONFIG_FILE" dns || true)"; if [[ -n "$d" ]]; then DNS="$(normalize_list_csv "$d")"; fi
+    sd="$(yaml_spec_get "$CONFIG_FILE" searchDomains || true)"; if [[ -n "$sd" ]]; then SEARCH="$(normalize_list_csv "$sd")"; fi
     GW="$(yaml_spec_get "$CONFIG_FILE" gateway || true)"
     URL="$(yaml_spec_get "$CONFIG_FILE" serverURL || true)"
     TOKEN="$(yaml_spec_get "$CONFIG_FILE" token || true)"
   fi
 
-  [[ -n "$IP"      ]] || read -rp "Enter static IPv4 for this agent node: " IP
-  [[ -n "$PREFIX"  ]] || read -rp "Enter subnet prefix length (0-32) [default 24]: " PREFIX
-  [[ -n "$HOSTNAME"]] || read -rp "Enter hostname for this agent node: " HOSTNAME
-
-  if [[ -z "${GW:-}" ]]; then read -rp "Enter default gateway IPv4 [leave blank to skip]: " GW || true; fi
+  # Prompts
+  if [[ -z "$IP" ]];      then read -rp "Enter static IPv4 for this agent node: " IP; fi
+  if [[ -z "$PREFIX" ]];  then read -rp "Enter subnet prefix length (0-32) [default 24]: " PREFIX; fi
+  if [[ -z "$HOSTNAME" ]];then read -rp "Enter hostname for this agent node: " HOSTNAME; fi
+  if [[ -z "$GW" ]];      then read -rp "Enter default gateway IPv4 [leave blank to skip]: " GW || true; fi
   log INFO "Gateway entered (agent): ${GW:-<none>}"
 
   if [[ -z "$DNS" ]]; then
     read -rp "Enter DNS IPv4s (comma-separated) [blank=default ${DEFAULT_DNS}]: " DNS || true
-    [[ -z "$DNS" ]] && DNS="$DEFAULT_DNS" && log INFO "Using default DNS for agent: $DNS"
+    if [[ -z "$DNS" ]]; then DNS="$DEFAULT_DNS"; log INFO "Using default DNS for agent: $DNS"; fi
   fi
-  if [[ -n "${DEFAULT_SEARCH:-}" && -z "$SEARCH" ]]; then
+
+  if [[ -z "$SEARCH" && -n "${DEFAULT_SEARCH:-}" ]]; then
     SEARCH="$DEFAULT_SEARCH"
     log INFO "Using default search domains for agent: $SEARCH"
   fi
 
-  if [[ -z "${URL:-}" ]]; then read -rp "Enter RKE2 server URL (e.g., https://<server-ip>:9345) [optional]: " URL || true; fi
-  if [[ -n "$URL" && -z "${TOKEN:-}" ]]; then read -rp "Enter cluster join token [optional]: " TOKEN || true; fi
+  if [[ -z "$URL" ]]; then
+    read -rp "Enter RKE2 server URL (e.g., https://<server-ip>:9345) [optional]: " URL || true
+  fi
+  if [[ -n "$URL" && -z "$TOKEN" ]]; then
+    read -rp "Enter cluster join token [optional]: " TOKEN || true
+  fi
 
-  while ! valid_ipv4 "$IP"; do read -rp "Invalid IPv4. Re-enter agent IP: " IP; done
+  # Validation
+  while ! valid_ipv4 "$IP"; do read -rp "Invalid IPv4. Re-enter agent IP: " IP; endone=false; done
   while ! valid_prefix "${PREFIX:-}"; do read -rp "Invalid prefix (0-32). Re-enter agent prefix [default 24]: " PREFIX; done
   while ! valid_ipv4_or_blank "${GW:-}"; do read -rp "Invalid gateway IPv4 (or blank). Re-enter: " GW; done
   while ! valid_csv_dns "${DNS:-}"; do read -rp "Invalid DNS list. Re-enter CSV IPv4s: " DNS; done
   while ! valid_search_domains_csv "${SEARCH:-}"; do read -rp "Invalid search domain list. Re-enter CSV: " SEARCH; done
-  [[ -z "${PREFIX:-}" ]] && PREFIX=24
+  if [[ -z "${PREFIX:-}" ]]; then PREFIX=24; fi
 
+  # Ensure installer is staged
   local SRC="$STAGE_DIR"
-  [[ -f "$STAGE_DIR/install.sh" ]] || SRC="$DOWNLOADS_DIR"
-  [[ -f "$SRC/install.sh" ]] || { log ERROR "Missing install.sh. Run 'pull' then 'image' first."; exit 3; }
+  if [[ ! -f "$STAGE_DIR/install.sh" ]]; then SRC="$DOWNLOADS_DIR"; fi
+  if [[ ! -f "$SRC/install.sh" ]]; then
+    log ERROR "Missing install.sh. Run 'pull' then 'image' first."
+    exit 3
+  fi
 
   ensure_containerd_ready
   log INFO "Proceeding with offline RKE2 agent install..."
@@ -784,12 +805,13 @@ action_agent() {
 
   systemctl enable rke2-agent
 
+  # Write server/token only if provided
   mkdir -p /etc/rancher/rke2
-  [[ -n "${URL:-}"   ]] && echo "server: \"$URL\"" >> /etc/rancher/rke2/config.yaml
-  [[ -n "${TOKEN:-}" ]] && echo "token: \"$TOKEN\"" >> /etc/rancher/rke2/config.yaml
+  if [[ -n "$URL" ]];   then echo "server: \"$URL\"" >> /etc/rancher/rke2/config.yaml; fi
+  if [[ -n "$TOKEN" ]]; then echo "token: \"$TOKEN\"" >> /etc/rancher/rke2/config.yaml; fi
 
   hostnamectl set-hostname "$HOSTNAME"
-  grep -q "$HOSTNAME" /etc/hosts || echo "$IP $HOSTNAME" >> /etc/hosts
+  if ! grep -q "$HOSTNAME" /etc/hosts; then echo "$IP $HOSTNAME" >> /etc/hosts; fi
 
   write_netplan "$IP" "$PREFIX" "${GW:-}" "${DNS:-}" "${SEARCH:-}"
   echo "A reboot is required to apply network changes."
@@ -798,10 +820,11 @@ action_agent() {
     log INFO "Auto-yes: rebooting now."
     reboot
   fi
+
   read -rp "Reboot now? [y/N]: " confirm
   case "$confirm" in
-    [Yy]) log INFO "Rebooting..."; reboot ;;
-    *)    log WARN "Reboot deferred. Please reboot before using this node." ;;
+    Y|y) log INFO "Rebooting..."; reboot ;;
+    *)   log WARN "Reboot deferred. Please reboot before using this node." ;;
   esac
 }
 
