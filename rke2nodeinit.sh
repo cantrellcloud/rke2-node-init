@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
 #
-# rke2nodeinit.sh (rewritten for clarity and education)
+# If not running under bash, re-exec with bash
+if [ -z "${BASH_VERSION:-}" ]; then
+  exec /usr/bin/env bash "$0" "$@"
+fi
+#
+# rke2nodeinit.sh
 # ----------------------------------------------------
 # Purpose:
 #   Prepare and configure a Linux VM/host (Ubuntu/Debian-based) for an offline/air‑gapped
-#   Rancher RKE2 Kubernetes deployment. This script supports five main actions:
+#   Rancher RKE2 Kubernetes deployment. This script supports six main actions:
 #
 #     1) pull   - Download RKE2 artifacts (images + tarball + checksums) on an online host
 #     2) push   - Tag, authenticate, and push preloaded images into a private registry
@@ -73,7 +78,7 @@ log() {
   printf "%s %s rke2nodeinit[%d]: %s %s\n" "$ts" "$host" "$$" "$level:" "$msg" >> "$LOG_FILE"
 }
 
-# Rotate/compress logs older than 60 days (quietly)
+# Rotate/compress logs older than                          60 days
 find "$LOG_DIR" -type f -name "rke2nodeinit_*.log" -mtime +60 -exec gzip -q {} \; -exec mv {}.gz "$LOG_DIR" \; || true
 
 # ---------- Root check --------------------------------------------------------------------
