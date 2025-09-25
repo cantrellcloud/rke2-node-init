@@ -10,4 +10,4 @@ spec:
   dns: ["10.0.1.34", "10.231.1.34"]
   searchDomains: ["dev.kube", "dev.local"]
   serverURL: https://10.0.4.101:9345
-  token: K10df4d29fb3afc4b3cbe609958a68ce09b97290e0deec682eedd478d815e20f53c::server:2656678c7128e9e857ba4df47bd2dcee
+  token: K10da438f09e6d2e352efc49269bc6f42f36b33aecd77706f51ae862c97780162d1::server:00ee09ca24f79fd3dedbb9835278f5b2
