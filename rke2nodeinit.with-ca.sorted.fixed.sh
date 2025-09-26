@@ -134,19 +134,23 @@ extract_with_progress() {
   # usage: extract_with_progress <tarfile> <destdir> [flags]
   local tarfile="$1" dest="$2" flags="${3:--xzf}"
   local label="Extracting $(basename "$tarfile")"
+  local rc=0
+
   mkdir -p "$dest"
+
+  # Strip 'f' from combined flags; we'll always pass -f explicitly
+  local tar_flags="${flags//f/}"
+
   if command -v pv >/dev/null 2>&1; then
     # Show byte progress if pv is present
-    #pv "$tarfile" | tar ${flags/--/ -} -C "$dest" -f - >>"$LOG_FILE" 2>&1
-    pv "$tarfile" | tar ${flags/--/ -} -f - -C "$dest" >>"$LOG_FILE" 2>&1
+    pv "$tarfile" | tar $tar_flags -f - -C "$dest" >>"$LOG_FILE" 2>&1
     rc=$?
   else
     # Use tar checkpoints to emit dots to the console
-    # Run tar under spinner so we wait on a proper child PID (avoid bash wait 127)
-    #spinner_run "$label" tar $flags -C "$dest" -f "$tarfile"
-    spinner_run "$label" tar $flags -f "$tarfile" -C "$dest"
+    spinner_run "$label" tar $tar_flags -f "$tarfile" -C "$dest"
     rc=$?
   fi
+
   if (( rc != 0 )); then
     log ERROR "Extraction failed: $tarfile"
     return $rc
