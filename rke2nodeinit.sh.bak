@@ -40,7 +40,7 @@ esac
 #   - strong input validation for IP/prefix/DNS/search
 #
 # YAML (apiVersion: rkeprep/v1) kinds determine action when using -f <file>:
-#   - kind: Pull|pull, Push|push, Image|image, Server|server, AddServer|add-server|addServer, Agent|agent
+#   - kind: Pull|pull, Push|push, Image|image, Server|server, Agent|agent
 #
 # Exit codes:
 #   0 success | 1 usage | 2 missing prerequisites | 3 data missing | 4 registry auth | 5 YAML issues
@@ -97,75 +97,6 @@ spinner_run() {
   fi
 }
 
-# Simple progress utilities
-download_with_progress() {
-  # usage: download_with_progress <url> <out> [label]
-  local url="$1" out="$2" label="${3:-Downloading $(basename "$2")}"
-  log INFO "$label ($url -> $out)"
-  mkdir -p "$(dirname "$out")"
-  # Prefer curl progress bar; fall back to wget; else spinner
-  if command -v curl >/dev/null 2>&1; then
-    # Use curl's progress bar (to stderr), while logging to file
-    {
-      curl -L --fail --progress-bar "$url" -o "$out" 2> >(stdbuf -oL tr -d '\r' | sed -u 's/^/[DL] /') 
-    } >>"$LOG_FILE" 2>>"$LOG_FILE"
-    rc=$?
-  elif command -v wget >/dev/null 2>&1; then
-    {
-      wget --progress=bar:force:noscroll -O "$out" "$url" 2>&1 | sed -u 's/^/[DL] /'
-    } >>"$LOG_FILE" 2>>"$LOG_FILE"
-    rc=$?
-  else
-    spinner_run "$label" sh -c "python3 - <<'PY'\nimport sys, time\nfor i in range(40):\n print('.', end='', flush=True); time.sleep(0.1)\nprint()\nPY"
-    rc=0
-  fi
-  if (( rc != 0 )); then
-    log ERROR "Download failed: $url"
-    return $rc
-  fi
-  echo "[OK] $(basename "$out")"
-}
-
-extract_with_progress() {
-  # usage: extract_with_progress <tarfile> <destdir> [flags]
-  local tarfile="$1" dest="$2" flags="${3:--xzf}"
-  local label="Extracting $(basename "$tarfile")"
-  mkdir -p "$dest"
-  if command -v pv >/dev/null 2>&1; then
-    # Show byte progress if pv is present
-    pv "$tarfile" | tar ${flags/--/ -} -C "$dest" -f - >>"$LOG_FILE" 2>&1
-    rc=$?
-  else
-    # Use tar checkpoints to emit dots to the console
-    tar $flags -C "$dest" -f "$tarfile" --checkpoint=.200 --checkpoint-action=echo="." >>"$LOG_FILE" 2>&1 &
-    local pid=$!
-    spinner_run "$label" bash -c "wait $pid"
-    rc=$?
-  fi
-  if (( rc != 0 )); then
-    log ERROR "Extraction failed: $tarfile"
-    return $rc
-  fi
-  echo "[OK] $(basename "$tarfile") extracted"
-}
-
-process_stream_with_progress() {
-  # usage: process_stream_with_progress <infile> <command...>
-  # Example: process_stream_with_progress rke2-images.tar.zst "zstd -d -c | nerdctl -n k8s.io load"
-  local infile="$1"; shift
-  local pipeline="$*"
-  local label="Processing $(basename "$infile")"
-  if command -v pv >/dev/null 2>&1; then
-    # pv -> pipeline
-    bash -c "pv \"$infile\" | eval \"$pipeline\"" >>"$LOG_FILE" 2>&1 &
-    local pid=$!
-    spinner_run "$label" bash -c "wait $pid"
-  else
-    spinner_run "$label" bash -c "eval \"$pipeline\"" 
-  fi
-}
-
-
 # Rotate/compress logs older than 60 days
 find "$LOG_DIR" -type f -name "rke2nodeinit_*.log" -mtime +60 -exec gzip -q {} \; -exec mv {}.gz "$LOG_DIR" \; || true
 
@@ -204,7 +135,7 @@ print_help() {
   cat <<'EOF'
 Usage:
   sudo ./rke2nodeinit.sh -f file.yaml [options]
-  sudo ./rke2nodeinit.sh [options] <pull|push|image|server|add-server|agent|verify>
+  sudo ./rke2nodeinit.sh [options] <pull|push|image|server|agent|verify>
   sudo ./rke2nodeinit.sh examples/pull.yaml
 
 Options:
@@ -333,10 +264,9 @@ install_containerd_nerdctl_full() {
   tmp="$(mktemp -d)"
 
   log INFO "Downloading nerdctl FULL bundle ${tag} for ${ARCH}"
-  download_with_progress "$url" "$tmp/nerdctl-full.tar.gz" "Downloading nerdctl FULL $tag"
-  tar -tzf "$tmp/nerdctl-full.tar.gz" >/dev/null 2>>"$LOG_FILE" || { log ERROR "Corrupt nerdctl tarball"; exit 2; }
+  spinner_run "Downloading nerdctl FULL ${tag}" curl -fL "$url" -o "$tmp/nerdctl-full.tgz"
 
-  extract_with_progress "$tmp/nerdctl-full.tar.gz" /
+  spinner_run "Extracting nerdctl FULL bundle" tar -C /usr/local -xzf "$tmp/nerdctl-full.tgz"
   rm -rf "$tmp" >>"$LOG_FILE" 2>&1 || true
 
   # Ensure systemd sees the unit files from the bundle (/usr/local/lib/systemd/system)
@@ -679,11 +609,10 @@ action_pull() {
   ensure_installed ca-certificates
 
   log INFO "Downloading artifacts (images, tarball, checksums, installer)..."
-  download_with_progress "$BASE_URL/$IMAGES_TAR" "$IMAGES_TAR" "Downloading $IMAGES_TAR"
-  download_with_progress "$BASE_URL/$RKE2_TARBALL" "$RKE2_TARBALL" "Downloading $RKE2_TARBALL"
-  download_with_progress "$BASE_URL/$SHA256_FILE" "$SHA256_FILE" "Downloading $SHA256_FILE"
-  download_with_progress "https://get.rke2.io" "install.sh" "Downloading install.sh"
-  chmod +x install.sh
+  spinner_run "Downloading $IMAGES_TAR"  curl -Lf "$BASE_URL/$IMAGES_TAR"   -o "$IMAGES_TAR"
+  spinner_run "Downloading $RKE2_TARBALL" curl -Lf "$BASE_URL/$RKE2_TARBALL" -o "$RKE2_TARBALL"
+  spinner_run "Downloading $SHA256_FILE"  curl -Lf "$BASE_URL/$SHA256_FILE"  -o "$SHA256_FILE"
+  spinner_run "Downloading install.sh"    curl -sfL "https://get.rke2.io"    -o install.sh
   chmod +x install.sh
 
   log INFO "Verifying checksums..."
@@ -692,7 +621,7 @@ action_pull() {
   echo "[DONE] Checksums verified"
 
   log INFO "Pre-loading images into containerd via nerdctl..."
-  process_stream_with_progress "$IMAGES_TAR" "zstd -d -c \"$IMAGES_TAR\" | nerdctl -n k8s.io load"
+  spinner_run "Loading images into containerd" bash -c "zstdcat \"$IMAGES_TAR\" | nerdctl -n k8s.io load"
 
   popd >/dev/null
   log INFO "pull: completed successfully."
@@ -1022,106 +951,6 @@ action_agent() {
 }
 
 # ===============
-# ================
-# Action: ADD-SERVER (join existing HA control plane)
-action_add_server() {
-  load_site_defaults
-
-  local IP="" PREFIX="" HOSTNAME="" DNS="" SEARCH="" GW=""
-  local URL="" TOKEN="" TOKEN_FILE="" TLS_SANS=""
-
-  if [[ -n "$CONFIG_FILE" ]]; then
-    IP="$(yaml_spec_get "$CONFIG_FILE" ip || true)"
-    PREFIX="$(yaml_spec_get "$CONFIG_FILE" prefix || true)"
-    HOSTNAME="$(yaml_spec_get "$CONFIG_FILE" hostname || true)"
-    local d sd ts
-    d="$(yaml_spec_get "$CONFIG_FILE" dns || true)"; [[ -n "$d" ]] && DNS="$(normalize_list_csv "$d")"
-    sd="$(yaml_spec_get "$CONFIG_FILE" searchDomains || true)"; [[ -n "$sd" ]] && SEARCH="$(normalize_list_csv "$sd")"
-    GW="$(yaml_spec_get "$CONFIG_FILE" gateway || true)"
-    URL="$(yaml_spec_get "$CONFIG_FILE" serverURL || true)"
-    TOKEN="$(yaml_spec_get "$CONFIG_FILE" token || true)"
-    TOKEN_FILE="$(yaml_spec_get "$CONFIG_FILE" tokenFile || true)"
-    ts="$(yaml_spec_get "$CONFIG_FILE" tlsSans || true)"; [[ -n "$ts" ]] && TLS_SANS="$(normalize_list_csv "$ts")"
-  fi
-
-  [[ -z "$IP"      ]] && read -rp "Enter static IPv4 for this server node: " IP
-  [[ -z "$PREFIX"  ]] && read -rp "Enter subnet prefix length (0-32) [default 24]: " PREFIX
-  [[ -z "$HOSTNAME"]] && read -rp "Enter hostname for this server node: " HOSTNAME
-  [[ -z "$GW"      ]] && read -rp "Enter default gateway IPv4 [leave blank to skip]: " GW || true
-
-  if [[ -z "$DNS" ]]; then
-    read -rp "Enter DNS IPv4s (comma-separated) [blank=default ${DEFAULT_DNS}]: " DNS || true
-    [[ -z "$DNS" ]] && DNS="$DEFAULT_DNS"
-  fi
-  if [[ -z "$SEARCH" && -n "${DEFAULT_SEARCH:-}" ]]; then
-    SEARCH="$DEFAULT_SEARCH"
-  fi
-
-  # Cluster join info
-  [[ -z "$URL" ]] && read -rp "Enter EXISTING RKE2 server URL (e.g. https://<vip-or-node>:9345): " URL
-  if [[ -z "$TOKEN" && -z "$TOKEN_FILE" ]]; then
-    read -rp "Enter cluster join token (leave blank to provide a token file path): " TOKEN || true
-    if [[ -z "$TOKEN" ]]; then
-      read -rp "Enter path to token file (e.g., /var/lib/rancher/rke2/server/node-token): " TOKEN_FILE || true
-    fi
-  fi
-  [[ -z "$TLS_SANS" ]] && read -rp "Optional TLS SANs (CSV; hostnames/IPs) [blank=skip]: " TLS_SANS || true
-
-  # Validation
-  while ! valid_ipv4 "$IP"; do read -rp "Invalid IPv4. Re-enter server IP: " IP; done
-  while ! valid_prefix "${PREFIX:-}"; do read -rp "Invalid prefix (0-32). Re-enter server prefix [default 24]: " PREFIX; done
-  while ! valid_ipv4_or_blank "${GW:-}"; do read -rp "Invalid gateway IPv4 (or blank). Re-enter: " GW; done
-  while ! valid_csv_dns "${DNS:-}"; do read -rp "Invalid DNS list. Re-enter CSV IPv4s: " DNS; done
-  while ! valid_search_domains_csv "${SEARCH:-}"; do read -rp "Invalid search domain list. Re-enter CSV: " SEARCH; done
-  [[ -z "${PREFIX:-}" ]] && PREFIX=24
-
-  ensure_staged_artifacts
-  ensure_containerd_ready
-
-  # Write RKE2 config for join
-  mkdir -p /etc/rancher/rke2
-  # Preserve existing config (system-default-registry) if present; then append join settings
-  if [[ ! -f /etc/rancher/rke2/config.yaml ]]; then
-    : > /etc/rancher/rke2/config.yaml
-  fi
-
-  {
-    echo "server: \"$URL\""
-    if [[ -n "$TOKEN_FILE" ]]; then
-      echo "token_file: \"$TOKEN_FILE\""
-    else
-      echo "token: \"$TOKEN\""
-    fi
-    if [[ -n "$TLS_SANS" ]]; then
-      echo "tls-san:"
-      IFS=',' read -r -a _sans <<<"$TLS_SANS"
-      for s in "${_sans[@]}"; do
-        s="${s//\"/}"
-        s="${s// /}"
-        [[ -n "$s" ]] && echo "  - \"$s\""
-      done
-    fi
-  } >> /etc/rancher/rke2/config.yaml
-  chmod 600 /etc/rancher/rke2/config.yaml
-
-  log INFO "RKE2 join config written to /etc/rancher/rke2/config.yaml"
-  log INFO "server: $URL"
-  if [[ -n "$TOKEN_FILE" ]]; then log INFO "token_file: $TOKEN_FILE"; else log INFO "token: (redacted)"; fi
-
-  # Install rke2-server using staged artifacts
-  local SRC="$STAGE_DIR"
-  log INFO "Installing rke2-server (join existing control plane)..."
-  run_rke2_installer "$SRC" "server"
-  systemctl enable --now rke2-server >>"$LOG_FILE" 2>&1 || true
-
-  # Basic hostname and /etc/hosts
-  hostnamectl set-hostname "$HOSTNAME"
-  if ! grep -q "$HOSTNAME" /etc/hosts; then echo "$IP $HOSTNAME" >> /etc/hosts; fi
-
-  write_netplan "$IP" "$PREFIX" "${GW:-}" "${DNS:-}" "${SEARCH:-}"
-  echo "A reboot is recommended to ensure clean state. Network is already applied."
-}
-
 # Action: VERIFY
 action_verify() {
   if verify_prereqs; then
@@ -1185,12 +1014,11 @@ fi
 ACTION="${CLI_SUB:-}"
 if [[ -n "$CONFIG_FILE" && -z "$CLI_SUB" ]]; then
   case "$YAML_KIND" in
-    Pull|pull)        ACTION="pull"        ;;
-    Push|push)        ACTION="push"        ;;
-    Image|image)      ACTION="image"       ;;
-    Server|server)    ACTION="server"      ;;
-    AddServer|add-server|addServer) ACTION="add-server" ;;
-    Agent|agent)      ACTION="agent"       ;;
+    Pull|pull)     ACTION="pull"   ;;
+    Push|push)     ACTION="push"   ;;
+    Image|image)   ACTION="image"  ;;
+    Server|server) ACTION="server" ;;
+    Agent|agent)   ACTION="agent"  ;;
     *) log ERROR "Unsupported or missing YAML kind: '${YAML_KIND:-<none>}'"; exit 5;;
   esac
 fi
@@ -1200,7 +1028,6 @@ case "${ACTION:-}" in
   push)   action_push   ;;
   image)  action_image  ;;
   server) action_server ;;
-  add-server) action_add_server ;;
   agent)  action_agent  ;;
   verify) action_verify ;;
   *) print_help; exit 1 ;;

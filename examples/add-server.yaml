@@ -1,0 +1,21 @@
+apiVersion: rkeprep/v1
+kind: AddServer
+metadata:
+  name: join-control-plane
+spec:
+  # Node identity
+  hostname: cp-02
+  ip: 10.0.4.42
+  prefix: 24
+  gateway: 10.0.4.1
+  dns: 10.0.4.10,10.0.4.11
+  searchDomains: dev.kube,corp.local
+
+  # Cluster join info
+  serverURL: https://10.0.4.40:9345
+  # Provide either token OR tokenFile
+  tokenFile: /var/lib/rancher/rke2/server/node-token
+  # token: mysupersecrettoken
+
+  # Optional extra cert SANs (CSV list)
+  tlsSans: 10.0.4.40,10.0.4.41,cp-02,cp-vip.dev.kube
