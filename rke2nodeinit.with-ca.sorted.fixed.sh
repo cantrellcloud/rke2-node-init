@@ -64,7 +64,7 @@ mkdir -p "$LOG_DIR" "$OUT_DIR" "$DOWNLOADS_DIR" "$STAGE_DIR" "$SBOM_DIR"
 # ---------- Logging ----------------------------------------------------------------------------
 LOG_FILE="$LOG_DIR/rke2nodeinit_$(date -u +"%Y-%m-%dT%H-%M-%SZ").log"
 
-# ---------- Functions (alphabetical) --------------------------------------------
+# ---------- Functions () --------------------------------------------
 log() {
   local level="$1"; shift
   local msg="$*"
@@ -927,18 +927,18 @@ action_pull() {
     log WARN "Using YAML values; CLI flags may be overridden (pull)."
   fi
 
+  ensure_installed curl
+  ensure_installed zstd
+  ensure_installed yq
+  ensure_installed pv
+  ensure_installed ca-certificates
+
   detect_latest_rke2_version
   ensure_containerd_ready
 
   local BASE_URL="https://github.com/rancher/rke2/releases/download/${RKE2_VERSION//+/%2B}"
   mkdir -p "$DOWNLOADS_DIR"
   pushd "$DOWNLOADS_DIR" >/dev/null
-
-  ensure_installed curl
-  ensure_installed zstd
-  ensure_installed yq
-  ensure_installed pv
-  ensure_installed ca-certificates
 
   log INFO "Downloading artifacts (images, tarball, checksums, installer)..."
   download_with_progress "$BASE_URL/$IMAGES_TAR" "$IMAGES_TAR" "Downloading $IMAGES_TAR"
