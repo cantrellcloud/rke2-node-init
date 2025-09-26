@@ -1,5 +1,5 @@
 apiVersion: rkeprep/v1
-kind: Server
+kind: AddServer
 metadata:
   name: r01domain-ctrl03
 spec:
