@@ -555,6 +555,8 @@ install_rke2_prereqs() {
   log INFO "Installing RKE2 prereqs (iptables-nft, modules, sysctl, swapoff)"
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -y >>"$LOG_FILE" 2>&1
+  apt-get upgrade -y >>"$LOG_FILE" 2>&1
+  apt-get autoremove -y >>"$LOG_FILE" 2>&1
   apt-get install -y \
     curl ca-certificates iptables nftables ethtool socat conntrack iproute2 \
     ebtables openssl tar gzip zstd jq >>"$LOG_FILE" 2>&1
