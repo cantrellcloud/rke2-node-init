@@ -1,11 +1,11 @@
 apiVersion: rkeprep/v1
 kind: Server
 metadata:
-  name: copine-server2
+  name: copine-ctrl02
 spec:
   ip: 10.0.69.56
   prefix: 27
   gateway: 10.0.69.33
-  hostname: copine-server2
+  hostname: copine-ctrl02
   dns: ["172.16.69.71", "172.16.69.72"]
   searchDomains: ["dev.kube", "dev.local"]

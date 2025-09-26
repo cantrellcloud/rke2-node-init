@@ -1,12 +1,12 @@
 apiVersion: rkeprep/v1
 kind: Agent
 metadata:
-  name: copine-worker1
+  name: copine-work01
 spec:
   ip: 10.0.69.58
   prefix: 27
   gateway: 10.0.69.33
-  hostname: copine-worker1
+  hostname: copine-work01
   dns: ["10.0.1.34", "10.231.1.34"]
   searchDomains: ["corp.local", "dev.kube"]
   serverURL: https://10.0.0.10:9345

@@ -1,12 +1,12 @@
 apiVersion: rkeprep/v1
 kind: Agent
 metadata:
-  name: j64domain-worker2
+  name: j64domain-work01
 spec:
-  ip: 10.0.4.115
+  ip: 10.0.4.145
   prefix: 24
   gateway: 10.0.4.1
-  hostname: j64domain-worker2
+  hostname: j64domain-work01
   dns: ["10.0.1.34", "10.231.1.34"]
   searchDomains: ["dev.kube", "dev.local"]
   serverURL: https://10.0.4.111:9345
