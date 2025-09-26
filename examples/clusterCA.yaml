@@ -1,0 +1,10 @@
+apiVersion: rkeprep/v1
+kind: ClusterCA
+spec:
+  # paths may be absolute or relative to the script directory
+  rootCrt: certs/enterprise-root.crt
+  rootKey: certs/enterprise-root.key        # optional if you provide intermediate*
+  intermediateCrt: certs/issuing-ca.crt     # optional
+  intermediateKey: certs/issuing-ca.key     # optional
+  installToOSTrust: true                    # default true
+
