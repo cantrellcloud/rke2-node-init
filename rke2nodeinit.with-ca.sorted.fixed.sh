@@ -970,7 +970,7 @@ action_pull() {
   echo "[DONE] Checksums verified"
 
   log INFO "Pre-loading images into containerd via nerdctl..."
-  process_stream_with_progress "$IMAGES_TAR" "zstd -d -c \"$IMAGES_TAR\" | nerdctl -n k8s.io load"
+  spinner_run "Loading images into containerd" bash -c "zstdcat \"$IMAGES_TAR\" | nerdctl -n k8s.io load"
 
   popd >/dev/null
   log INFO "pull: completed successfully."
