@@ -371,10 +371,9 @@ install_containerd_nerdctl_full() {
   tmp="$(mktemp -d)"
 
   log INFO "Downloading nerdctl FULL bundle ${tag} for ${ARCH}"
-  download_with_progress "$url" "$tmp/nerdctl-full.tar.gz" "Downloading nerdctl FULL $tag"
-  tar -tzf "$tmp/nerdctl-full.tar.gz" >/dev/null 2>>"$LOG_FILE" || { log ERROR "Corrupt nerdctl tarball"; exit 2; }
+  spinner_run "Downloading nerdctl FULL ${tag}" curl -fL "$url" -o "$tmp/nerdctl-full.tgz"
 
-  extract_with_progress "$tmp/nerdctl-full.tar.gz" /
+  spinner_run "Extracting nerdctl FULL bundle" tar -C /usr/local -xzf "$tmp/nerdctl-full.tgz"
   rm -rf "$tmp" >>"$LOG_FILE" 2>&1 || true
 
   # Ensure systemd sees the unit files from the bundle (/usr/local/lib/systemd/system)
