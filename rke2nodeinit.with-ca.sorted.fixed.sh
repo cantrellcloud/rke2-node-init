@@ -958,11 +958,10 @@ action_pull() {
   pushd "$DOWNLOADS_DIR" >/dev/null
 
   log INFO "Downloading artifacts (images, tarball, checksums, installer)..."
-  download_with_progress "$BASE_URL/$IMAGES_TAR" "$IMAGES_TAR" "Downloading $IMAGES_TAR"
-  download_with_progress "$BASE_URL/$RKE2_TARBALL" "$RKE2_TARBALL" "Downloading $RKE2_TARBALL"
-  download_with_progress "$BASE_URL/$SHA256_FILE" "$SHA256_FILE" "Downloading $SHA256_FILE"
-  download_with_progress "https://get.rke2.io" "install.sh" "Downloading install.sh"
-  chmod +x install.sh
+  spinner_run "Downloading $IMAGES_TAR"  curl -Lf "$BASE_URL/$IMAGES_TAR"   -o "$IMAGES_TAR"
+  spinner_run "Downloading $RKE2_TARBALL" curl -Lf "$BASE_URL/$RKE2_TARBALL" -o "$RKE2_TARBALL"
+  spinner_run "Downloading $SHA256_FILE"  curl -Lf "$BASE_URL/$SHA256_FILE"  -o "$SHA256_FILE"
+  spinner_run "Downloading install.sh"    curl -sfL "https://get.rke2.io"    -o install.sh
   chmod +x install.sh
 
   log INFO "Verifying checksums..."
