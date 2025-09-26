@@ -63,6 +63,8 @@ mkdir -p "$LOG_DIR" "$OUT_DIR" "$DOWNLOADS_DIR" "$STAGE_DIR" "$SBOM_DIR"
 
 # ---------- Logging ----------------------------------------------------------------------------
 LOG_FILE="$LOG_DIR/rke2nodeinit_$(date -u +"%Y-%m-%dT%H-%M-%SZ").log"
+
+# ---------- Functions (alphabetical) --------------------------------------------
 log() {
   local level="$1"; shift
   local msg="$*"
@@ -72,6 +74,8 @@ log() {
   echo "[$level] $msg"
   printf "%s %s rke2nodeinit[%d]: %s %s\n" "$ts" "$host" "$$" "$level:" "$msg" >> "$LOG_FILE"
 }
+
+
 
 # Simple spinner for long-running steps (visible progress indicator)
 spinner_run() {
@@ -632,22 +636,23 @@ gen_sbom_or_metadata() {
 }
 
 run_rke2_installer() {
-  local src="$1" itype="${2:-}
+  local src="$1"
+  local itype="${2:-}"
+  set +e
+  if [[ -n "$itype" ]]; then
+    INSTALL_RKE2_TYPE="$itype" INSTALL_RKE2_ARTIFACT_PATH="$src" "$src/install.sh" >>"$LOG_FILE" 2>&1
+  else
+    INSTALL_RKE2_ARTIFACT_PATH="$src" "$src/install.sh" >>"$LOG_FILE" 2>&1
+  fi
+  local rc=$?
+  set -e
+  if (( rc != 0 )); then
+    log ERROR "RKE2 installer failed (exit $rc). See $LOG_FILE"
+    return "$rc"
+  fi
+  return 0
+}
 
-# ---------- Custom Cluster CA (kuberegistry-ca) -----------------------------------------------
-# If kuberegistry CA cert/key are provided, seed RKE2 with a custom cluster CA that chains to it.
-# This mirrors Istio-style CA plug-in so all cluster APIs present certs rooted in the same enterprise CA.
-# Inputs (looked up automatically):
-#   - $SCRIPT_DIR/certs/kuberegistry-ca.crt  (required, PEM)
-#   - $SCRIPT_DIR/certs/kuberegistry-ca.key  (optional, PEM; if present, treated as root key)
-#   - $SCRIPT_DIR/certs/kuberegistry-intermediate-ca.crt (optional)
-#   - $SCRIPT_DIR/certs/kuberegistry-intermediate-ca.key (optional; used if provided with .crt)
-# Behavior:
-#   - Installs kuberegistry-ca.crt into the OS trust store (if not already)
-#   - If a signing key is available (root or intermediate), generates the full RKE2 CA set
-#     in /var/lib/rancher/rke2/server/tls using the upstream helper script. Prefers an offline
-#     copy staged at $STAGE_DIR/generate-custom-ca-certs.sh; otherwise falls back to $DOWNLOADS_DIR,
-#     else tries to fetch via curl.
 setup_custom_cluster_ca() {
   local ROOT_CRT="${CUSTOM_CA_ROOT_CRT:-$SCRIPT_DIR/certs/kuberegistry-ca.crt}"
   local ROOT_KEY="${CUSTOM_CA_ROOT_KEY:-$SCRIPT_DIR/certs/kuberegistry-ca.key}"
@@ -739,7 +744,6 @@ setup_custom_cluster_ca() {
 
 }
 
-# ---------- Verify: custom cluster CA -----------------------------------------------------------
 verify_custom_cluster_ca() {
   local TLS_DIR="/var/lib/rancher/rke2/server/tls"
   local ROOT_CA="${CUSTOM_CA_ROOT_CRT:-$TLS_DIR/root-ca.pem}"
@@ -805,22 +809,6 @@ verify_custom_cluster_ca() {
     echo "VERIFY (Cluster CA): FAIL ($fail failed, $ok passed)"
   fi
   return $fail
-}
-
-"
-  set +e
-  if [[ -n "$itype" ]]; then
-    INSTALL_RKE2_TYPE="$itype" INSTALL_RKE2_ARTIFACT_PATH="$src" "$src/install.sh" >>"$LOG_FILE" 2>&1
-  else
-    INSTALL_RKE2_ARTIFACT_PATH="$src" "$src/install.sh" >>"$LOG_FILE" 2>&1
-  fi
-  local rc=$?
-  set -e
-  if (( rc != 0 )); then
-    log ERROR "RKE2 installer failed (exit $rc). See $LOG_FILE"
-    return "$rc"
-  fi
-  return 0
 }
 
 ensure_staged_artifacts() {
@@ -1154,46 +1142,13 @@ EOF
   log INFO "Applying OS updates; the system will reboot automatically..."
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -y >>"$LOG_FILE" 2>&1
-  apt-get -o Dpkg::
-YAML kinds (apiVersion: rkeprep/v1):
-  - kind: Pull|push|Image|Server|AddServer|Agent|ClusterCA|Verify
-
-Example: ClusterCA
----
-apiVersion: rkeprep/v1
-kind: ClusterCA
-spec:
-  # Absolute or relative to the script directory
-  rootCrt: certs/enterprise-root.crt
-  rootKey: certs/enterprise-root.key        # optional; OR use intermediate* below
-  intermediateCrt: certs/issuing-ca.crt     # optional
-  intermediateKey: certs/issuing-ca.key     # optional
-  installToOSTrust: true                    # default true
----
-
-Options::="--force-confdef" -o Dpkg::
-YAML kinds (apiVersion: rkeprep/v1):
-  - kind: Pull|push|Image|Server|AddServer|Agent|ClusterCA|Verify
-
-Example: ClusterCA
----
-apiVersion: rkeprep/v1
-kind: ClusterCA
-spec:
-  # Absolute or relative to the script directory
-  rootCrt: certs/enterprise-root.crt
-  rootKey: certs/enterprise-root.key        # optional; OR use intermediate* below
-  intermediateCrt: certs/issuing-ca.crt     # optional
-  intermediateKey: certs/issuing-ca.key     # optional
-  installToOSTrust: true                    # default true
----
-
-Options::="--force-confold" dist-upgrade -y >>"$LOG_FILE" 2>&1
+  apt-get -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" dist-upgrade -y >>"$LOG_FILE" 2>&1
   apt-get autoremove -y >>"$LOG_FILE" 2>&1 || true
   apt-get autoclean  -y >>"$LOG_FILE" 2>&1 || true
   log WARN "Rebooting now to complete updates."
   sleep 10
   reboot
+
 }
 
 # ==============
