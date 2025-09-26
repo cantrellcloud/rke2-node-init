@@ -937,6 +937,7 @@ action_pull() {
   ensure_installed curl
   ensure_installed zstd
   ensure_installed yq
+  ensure_installed pv
   ensure_installed ca-certificates
 
   log INFO "Downloading artifacts (images, tarball, checksums, installer)..."
@@ -1325,10 +1326,10 @@ action_add_server() {
     ts="$(yaml_spec_get "$CONFIG_FILE" tlsSans || true)"; [[ -n "$ts" ]] && TLS_SANS="$(normalize_list_csv "$ts")"
   fi
 
-  [[ -z "$IP"      ]] && read -rp "Enter static IPv4 for this server node: " IP
-  [[ -z "$PREFIX"  ]] && read -rp "Enter subnet prefix length (0-32) [default 24]: " PREFIX
-  [[ -z "$HOSTNAME"]] && read -rp "Enter hostname for this server node: " HOSTNAME
-  [[ -z "$GW"      ]] && read -rp "Enter default gateway IPv4 [leave blank to skip]: " GW || true
+  [[ -z "$IP"       ]] && read -rp "Enter static IPv4 for this server node: " IP
+  [[ -z "$PREFIX"   ]] && read -rp "Enter subnet prefix length (0-32) [default 24]: " PREFIX
+  [[ -z "$HOSTNAME" ]] && read -rp "Enter hostname for this server node: " HOSTNAME
+  [[ -z "$GW"       ]] && read -rp "Enter default gateway IPv4 [leave blank to skip]: " GW || true
 
   if [[ -z "$DNS" ]]; then
     read -rp "Enter DNS IPv4s (comma-separated) [blank=default ${DEFAULT_DNS}]: " DNS || true
