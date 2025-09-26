@@ -9,3 +9,7 @@ spec:
   hostname: j64manager-ctrl03
   dns: ["10.0.1.34", "10.231.1.34"]
   searchDomains: ["dev.kube", "dev.local"]
+
+  serverURL: https://10.0.4.131
+  tokenFile: /tokens/j64manager-token
+  #tlsSans: 

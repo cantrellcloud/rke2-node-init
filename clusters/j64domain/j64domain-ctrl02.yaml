@@ -1,5 +1,5 @@
 apiVersion: rkeprep/v1
-kind: Server
+kind: AddServer
 metadata:
   name: j64domain-ctrl02
 spec:
@@ -9,3 +9,7 @@ spec:
   hostname: j64domain-ctrl02
   dns: ["10.0.1.34", "10.231.1.34"]
   searchDomains: ["dev.kube", "dev.local"]
+
+  serverURL: https://10.0.4.141
+  tokenFile: /tokens/j64domain-token
+  #tlsSans: 

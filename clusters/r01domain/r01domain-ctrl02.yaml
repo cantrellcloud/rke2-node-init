@@ -9,3 +9,7 @@ spec:
   hostname: r01domain-ctrl02
   dns: ["10.0.1.34", "10.231.1.34"]
   searchDomains: ["dev.kube", "dev.local"]
+
+  serverURL: https://10.0.4.161
+  tokenFile: /tokens/r01domain-token
+  #tlsSans: 
