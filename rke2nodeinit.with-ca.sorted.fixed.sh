@@ -75,21 +75,33 @@ log() {
   printf "%s %s rke2nodeinit[%d]: %s %s\n" "$ts" "$host" "$$" "$level:" "$msg" >> "$LOG_FILE"
 }
 
-
-
 # Simple spinner for long-running steps (visible progress indicator)
 spinner_run() {
   local label="$1"; shift
   local cmd=( "$@" )
   log INFO "$label..."
+
   ( "${cmd[@]}" >>"$LOG_FILE" 2>&1 ) &
   local pid=$!
-  local spin='|/-\' ; local i=0
+
+  # Forward signals to the child so Ctrl-C works cleanly
+  trap 'kill -TERM "$pid" 2>/dev/null' TERM INT
+
+  local spin='|/-\' i=0
   while kill -0 "$pid" 2>/dev/null; do
     printf "\r[WORK] %s %s" "${spin:i++%${#spin}:1}" "$label"
     sleep 0.15
   done
-  wait "$pid"; local rc=$?
+
+  # <-- this is the critical change: protect wait from set -e
+  local rc
+  if wait "$pid"; then
+    rc=0
+  else
+    rc=$?
+  fi
+
+  trap - TERM INT
   printf "\r"
   if (( rc == 0 )); then
     echo "[DONE] $label"
