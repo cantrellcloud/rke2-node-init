@@ -817,10 +817,10 @@ action_server() {
     GW="$(yaml_spec_get "$CONFIG_FILE" gateway || true)"
   fi
 
-  if [[ -z "$IP" ]];      then read -rp "Enter static IPv4 for this server node: " IP; fi
-  if [[ -z "$PREFIX" ]];  then read -rp "Enter subnet prefix length (0-32) [default 24]: " PREFIX; fi
-  if [[ -z "$HOSTNAME" ]];then read -rp "Enter hostname for this server node: " HOSTNAME; fi
-  if [[ -z "$GW" ]];      then read -rp "Enter default gateway IPv4 [leave blank to skip]: " GW || true; fi
+  if [[ -z "$IP"       ]]; then read -rp "Enter static IPv4 for this server node: " IP; fi
+  if [[ -z "$PREFIX"   ]]; then read -rp "Enter subnet prefix length (0-32) [default 24]: " PREFIX; fi
+  if [[ -z "$HOSTNAME" ]]; then read -rp "Enter hostname for this server node: " HOSTNAME; fi
+  if [[ -z "$GW"       ]]; then read -rp "Enter default gateway IPv4 [leave blank to skip]: " GW || true; fi
   log INFO "Gateway entered (server): ${GW:-<none>}"
 
   if [[ -z "$DNS" ]]; then
