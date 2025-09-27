@@ -40,7 +40,7 @@ esac
 #   - strong input validation for IP/prefix/DNS/search
 #
 # YAML (apiVersion: rkeprep/v1) kinds determine action when using -f <file>:
-#   - kind: Pull|pull, Push|push, Image|image, Server|server, AddServer|add-server|addServer, Agent|agent, ClusterCA|cluster-ca
+#   - kind: Pull|pull, Push|push, Image|image, Server|server, Agent|agent
 #
 # Exit codes:
 #   0 success | 1 usage | 2 missing prerequisites | 3 data missing | 4 registry auth | 5 YAML issues
@@ -63,8 +63,6 @@ mkdir -p "$LOG_DIR" "$OUT_DIR" "$DOWNLOADS_DIR" "$STAGE_DIR" "$SBOM_DIR"
 
 # ---------- Logging ----------------------------------------------------------------------------
 LOG_FILE="$LOG_DIR/rke2nodeinit_$(date -u +"%Y-%m-%dT%H-%M-%SZ").log"
-
-# ---------- Functions () --------------------------------------------
 log() {
   local level="$1"; shift
   local msg="$*"
@@ -80,28 +78,14 @@ spinner_run() {
   local label="$1"; shift
   local cmd=( "$@" )
   log INFO "$label..."
-
   ( "${cmd[@]}" >>"$LOG_FILE" 2>&1 ) &
   local pid=$!
-
-  # Forward signals to the child so Ctrl-C works cleanly
-  trap 'kill -TERM "$pid" 2>/dev/null' TERM INT
-
-  local spin='|/-\' i=0
+  local spin='|/-\' ; local i=0
   while kill -0 "$pid" 2>/dev/null; do
     printf "\r[WORK] %s %s" "${spin:i++%${#spin}:1}" "$label"
     sleep 0.15
   done
-
-  # <-- this is the critical change: protect wait from set -e
-  local rc
-  if wait "$pid"; then
-    rc=0
-  else
-    rc=$?
-  fi
-
-  trap - TERM INT
+  wait "$pid"; local rc=$?
   printf "\r"
   if (( rc == 0 )); then
     echo "[DONE] $label"
@@ -112,80 +96,6 @@ spinner_run() {
     exit "$rc"
   fi
 }
-
-# Simple progress utilities
-download_with_progress() {
-  # usage: download_with_progress <url> <out> [label]
-  local url="$1" out="$2" label="${3:-Downloading $(basename "$2")}"
-  log INFO "$label ($url -> $out)"
-  mkdir -p "$(dirname "$out")"
-  # Prefer curl progress bar; fall back to wget; else spinner
-  if command -v curl >/dev/null 2>&1; then
-    # Use curl's progress bar (to stderr), while logging to file
-    {
-      curl -L --fail --progress-bar "$url" -o "$out" 2> >(stdbuf -oL tr -d '\r' | sed -u 's/^/[DL] /') 
-    } >>"$LOG_FILE" 2>>"$LOG_FILE"
-    rc=$?
-  elif command -v wget >/dev/null 2>&1; then
-    {
-      wget --progress=bar:force:noscroll -O "$out" "$url" 2>&1 | sed -u 's/^/[DL] /'
-    } >>"$LOG_FILE" 2>>"$LOG_FILE"
-    rc=$?
-  else
-    spinner_run "$label" sh -c "python3 - <<'PY'\nimport sys, time\nfor i in range(40):\n print('.', end='', flush=True); time.sleep(0.1)\nprint()\nPY"
-    rc=0
-  fi
-  if (( rc != 0 )); then
-    log ERROR "Download failed: $url"
-    return $rc
-  fi
-  echo "[OK] $(basename "$out")"
-}
-
-extract_with_progress() {
-  # usage: extract_with_progress <tarfile> <destdir> [flags]
-  local tarfile="$1" dest="$2" flags="${3:--xzf}"
-  local label="Extracting $(basename "$tarfile")"
-  local rc=0
-
-  mkdir -p "$dest"
-
-  # Strip 'f' from combined flags; we'll always pass -f explicitly
-  local tar_flags="${flags//f/}"
-
-  if command -v pv >/dev/null 2>&1; then
-    # Show byte progress if pv is present
-    pv "$tarfile" | tar $tar_flags -f - -C "$dest" >>"$LOG_FILE" 2>&1
-    rc=$?
-  else
-    # Use tar checkpoints to emit dots to the console
-    spinner_run "$label" tar $tar_flags -f "$tarfile" -C "$dest"
-    rc=$?
-  fi
-
-  if (( rc != 0 )); then
-    log ERROR "Extraction failed: $tarfile"
-    return $rc
-  fi
-  echo "[OK] $(basename "$tarfile") extracted"
-}
-
-process_stream_with_progress() {
-  # usage: process_stream_with_progress <infile> <command...>
-  # Example: process_stream_with_progress rke2-images.tar.zst "zstd -d -c | nerdctl -n k8s.io load"
-  local infile="$1"; shift
-  local pipeline="$*"
-  local label="Processing $(basename "$infile")"
-  if command -v pv >/dev/null 2>&1; then
-    # pv -> pipeline
-    bash -c "pv \"$infile\" | eval \"$pipeline\"" >>"$LOG_FILE" 2>&1 &
-    local pid=$!
-    spinner_run "$label" bash -c "wait $pid"
-  else
-    spinner_run "$label" bash -c "eval \"$pipeline\"" 
-  fi
-}
-
 
 # Rotate/compress logs older than 60 days
 find "$LOG_DIR" -type f -name "rke2nodeinit_*.log" -mtime +60 -exec gzip -q {} \; -exec mv {}.gz "$LOG_DIR" \; || true
@@ -225,25 +135,8 @@ print_help() {
   cat <<'EOF'
 Usage:
   sudo ./rke2nodeinit.sh -f file.yaml [options]
-  sudo ./rke2nodeinit.sh [options] <pull|push|image|server|add-server|agent|cluster-ca|verify>
+  sudo ./rke2nodeinit.sh [options] <pull|push|image|server|agent|verify>
   sudo ./rke2nodeinit.sh examples/pull.yaml
-
-
-YAML kinds (apiVersion: rkeprep/v1):
-  - kind: Pull|push|Image|Server|AddServer|Agent|ClusterCA|Verify
-
-Example: ClusterCA
----
-apiVersion: rkeprep/v1
-kind: ClusterCA
-spec:
-  # Absolute or relative to the script directory
-  rootCrt: certs/enterprise-root.crt
-  rootKey: certs/enterprise-root.key        # optional; OR use intermediate* below
-  intermediateCrt: certs/issuing-ca.crt     # optional
-  intermediateKey: certs/issuing-ca.key     # optional
-  installToOSTrust: true                    # default true
----
 
 Options:
   -f FILE     YAML config (apiVersion: rkeprep/v1; kind selects action)
@@ -555,8 +448,6 @@ install_rke2_prereqs() {
   log INFO "Installing RKE2 prereqs (iptables-nft, modules, sysctl, swapoff)"
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -y >>"$LOG_FILE" 2>&1
-  apt-get upgrade -y >>"$LOG_FILE" 2>&1
-  apt-get autoremove -y >>"$LOG_FILE" 2>&1
   apt-get install -y \
     curl ca-certificates iptables nftables ethtool socat conntrack iproute2 \
     ebtables openssl tar gzip zstd jq >>"$LOG_FILE" 2>&1
@@ -617,18 +508,7 @@ verify_prereqs() {
   [[ -f "$SCRIPT_DIR/downloads/$RKE2_TARBALL"   ]] && log INFO "Found RKE2 tarball"       || log WARN "RKE2 tarball missing ($SCRIPT_DIR/downloads)"
   [[ -f "$STAGE_DIR/install.sh"                 ]] && log INFO "Staged installer present" || log WARN "Staged installer missing ($STAGE_DIR)"
   [[ -f /etc/rancher/rke2/registries.yaml      ]] && log INFO "registries.yaml present"   || log WARN "registries.yaml missing"
-  # Verify the CA file referenced in registries.yaml (if any)
-  if [[ -f /etc/rancher/rke2/registries.yaml ]]; then
-    CA_FILE_PATH="$(awk -F': *' '/ca_file:/ {gsub(/"/,"",$2); print $2}' /etc/rancher/rke2/registries.yaml | head -n1)"
-    if [[ -n "$CA_FILE_PATH" && -f "$CA_FILE_PATH" ]]; then
-      log INFO "Registry CA present: $CA_FILE_PATH"
-    else
-      log WARN "Registry CA file missing or not set in registries.yaml"
-    fi
-  fi
-
-  # --- Custom Cluster CA sub-check ---
-  verify_custom_cluster_ca || fail=1
+  [[ -f /usr/local/share/ca-certificates/kuberegistry-ca.crt ]] && log INFO "CA installed" || log WARN "CA missing (/usr/local/share/ca-certificates/kuberegistry-ca.crt)"
 
   return $fail
 }
@@ -654,8 +534,7 @@ gen_sbom_or_metadata() {
 }
 
 run_rke2_installer() {
-  local src="$1"
-  local itype="${2:-}"
+  local src="$1" itype="${2:-}"
   set +e
   if [[ -n "$itype" ]]; then
     INSTALL_RKE2_TYPE="$itype" INSTALL_RKE2_ARTIFACT_PATH="$src" "$src/install.sh" >>"$LOG_FILE" 2>&1
@@ -669,164 +548,6 @@ run_rke2_installer() {
     return "$rc"
   fi
   return 0
-}
-
-setup_custom_cluster_ca() {
-  local ROOT_CRT="${CUSTOM_CA_ROOT_CRT:-$SCRIPT_DIR/certs/kuberegistry-ca.crt}"
-  local ROOT_KEY="${CUSTOM_CA_ROOT_KEY:-$SCRIPT_DIR/certs/kuberegistry-ca.key}"
-  local INT_CRT="${CUSTOM_CA_INT_CRT:-$SCRIPT_DIR/certs/kuberegistry-intermediate-ca.crt}"
-  local INT_KEY="${CUSTOM_CA_INT_KEY:-$SCRIPT_DIR/certs/kuberegistry-intermediate-ca.key}"
-  local TLS_DIR="/var/lib/rancher/rke2/server/tls"
-  local GEN1="$STAGE_DIR/generate-custom-ca-certs.sh"
-  local GEN2="$DOWNLOADS_DIR/generate-custom-ca-certs.sh"
-
-  # Optionally ensure OS trust (clients/servers on the host trust the root CA)
-  if [[ -f "$ROOT_CRT" ]]; then
-    if [[ "${CUSTOM_CA_INSTALL_TO_OS_TRUST:-1}" -ne 0 ]]; then
-      mkdir -p /usr/local/share/ca-certificates
-      local _bn="$(basename "$ROOT_CRT")"
-      if ! cmp -s "$ROOT_CRT" "/usr/local/share/ca-certificates/$_bn" 2>/dev/null; then
-        cp "$ROOT_CRT" "/usr/local/share/ca-certificates/$_bn"
-        update-ca-certificates >>"$LOG_FILE" 2>&1 || true
-        log INFO "Installed $_bn into OS trust store."
-      fi
-    fi
-  else
-    log WARN "Root CA not found; custom cluster CA will not be used."
-    return 0
-  fi
-
-  # If the cluster CA already exists, don't overwrite
-  if [[ -f "$TLS_DIR/server-ca.crt" || -f "$TLS_DIR/client-ca.crt" ]]; then
-    log INFO "Cluster CA appears to exist in $TLS_DIR; skipping custom CA generation."
-    return 0
-  fi
-
-  mkdir -p "$TLS_DIR"
-
-  # Stage inputs for the generator per RKE2 docs
-  if [[ -f "$ROOT_KEY" ]]; then
-    # Use provided root CA + key
-    cp -f "$ROOT_CRT" "$TLS_DIR/root-ca.pem"
-    cp -f "$ROOT_KEY" "$TLS_DIR/root-ca.key"
-    log INFO "Prepared root CA + key for custom cluster CA generation."
-  elif [[ -f "$INT_CRT" && -f "$INT_KEY" ]]; then
-    # Use root (public) + intermediate (public+key)
-    cp -f "$ROOT_CRT" "$TLS_DIR/root-ca.pem"
-    cp -f "$INT_CRT"  "$TLS_DIR/intermediate-ca.pem"
-    cp -f "$INT_KEY"  "$TLS_DIR/intermediate-ca.key"
-    log INFO "Prepared root + intermediate for custom cluster CA generation."
-  else
-    log WARN "No CA private key found (expected CUSTOM_CA_ROOT_KEY or CUSTOM_CA_INT_KEY). "\
-             "Will continue with RKE2 self-signed cluster CA."
-    return 0
-  fi
-
-  # Find the generator script (prefer offline copy)
-  local GEN=""
-  if [[ -x "$GEN1" ]]; then
-    GEN="$GEN1"
-  elif [[ -x "$GEN2" ]]; then
-    GEN="$GEN2"
-  fi
-
-  if [[ -n "$GEN" ]]; then
-    log INFO "Generating RKE2 custom CA set using offline helper: $GEN"
-    PRODUCT=rke2 DATA_DIR=/var/lib/rancher/rke2 bash "$GEN" >>"$LOG_FILE" 2>&1 || {
-      log ERROR "Custom CA generation failed via $GEN; leaving defaults in place."
-      return 1
-    }
-  else
-    if command -v curl >/dev/null 2>&1; then
-      log INFO "Downloading helper to generate custom CA set (one-time)."
-      curl -fsSL https://github.com/k3s-io/k3s/raw/master/contrib/util/generate-custom-ca-certs.sh \
-        | PRODUCT=rke2 DATA_DIR=/var/lib/rancher/rke2 bash - >>"$LOG_FILE" 2>&1 || {
-          log ERROR "Custom CA generation failed via curl; leaving defaults in place."
-          return 1
-        }
-    else
-      log ERROR "No offline helper found and curl not available; cannot generate custom cluster CA."
-      return 1
-    fi
-  fi
-
-  # Sanity: ensure the expected files exist
-  local need=(server-ca.crt server-ca.key client-ca.crt client-ca.key request-header-ca.crt request-header-ca.key etcd/peer-ca.crt etcd/peer-ca.key etcd/server-ca.crt etcd/server-ca.key service.key)
-  local missing=0
-  for f in "${need[@]}"; do
-    [[ -f "$TLS_DIR/$f" ]] || { log ERROR "Missing CA component after generation: $TLS_DIR/$f"; missing=1; }
-  done
-  if (( missing == 0 )); then
-    log INFO "Custom cluster CA seeded successfully. New clusters will chain to provided root."
-  fi
-
-}
-
-verify_custom_cluster_ca() {
-  local TLS_DIR="/var/lib/rancher/rke2/server/tls"
-  local ROOT_CA="${CUSTOM_CA_ROOT_CRT:-$TLS_DIR/root-ca.pem}"
-  local ok=0 fail=0
-
-  if [[ ! -d "$TLS_DIR" ]]; then
-    log WARN "TLS dir not found ($TLS_DIR); rke2-server may not be initialized yet."
-    return 0
-  fi
-
-  if [[ ! -f "$ROOT_CA" ]]; then
-    # Fallback to OS-installed copy of the configured CA
-    if [[ -n "${CUSTOM_CA_ROOT_CRT:-}" ]]; then
-      local bn="$(basename "$CUSTOM_CA_ROOT_CRT")"
-      if [[ -f "/usr/local/share/ca-certificates/$bn" ]]; then
-        ROOT_CA="/usr/local/share/ca-certificates/$bn"
-      fi
-    fi
-  fi
-
-  if [[ ! -f "$ROOT_CA" ]]; then
-    log WARN "Root CA file not found for verification; skipping CA chain checks."
-    return 0
-  fi
-
-  local to_check=(
-    "server-ca.crt"
-    "client-ca.crt"
-    "request-header-ca.crt"
-    "etcd/server-ca.crt"
-    "etcd/peer-ca.crt"
-  )
-
-  for f in "${to_check[@]}"; do
-    if [[ -f "$TLS_DIR/$f" ]]; then
-      if openssl verify -CAfile "$ROOT_CA" "$TLS_DIR/$f" >/dev/null 2>&1; then
-        log INFO "OK  : $(printf '%-22s' "$f") chains to root"
-        ((ok++))
-      else
-        log ERROR "FAIL: $(printf '%-22s' "$f") does NOT chain to root"
-        ((fail++))
-      fi
-    else
-      log WARN "Missing: $TLS_DIR/$f"
-    fi
-  done
-
-  # API server live check (if running)
-  if systemctl is-active --quiet rke2-server && ss -ltn | awk '{print $4}' | grep -qE '(^|:)6443$'; then
-    if timeout 5 openssl s_client -connect 127.0.0.1:6443 -verify_return_error -CAfile "$ROOT_CA" < /dev/null 2>&1 | grep -q "Verify return code: 0 (ok)"; then
-      log INFO "OK  : kube-apiserver handshake verified with provided root CA"
-    else
-      log ERROR "FAIL: kube-apiserver handshake could not be verified with provided root CA"
-      ((fail++))
-    fi
-  else
-    log WARN "kube-apiserver not reachable on 127.0.0.1:6443; skipping live handshake check."
-  fi
-
-  if (( fail == 0 )); then
-    echo "VERIFY (Cluster CA): PASS ($ok checks)"
-  else
-    echo "VERIFY (Cluster CA): FAIL ($fail failed, $ok passed)"
-  fi
-  return $fail
 }
 
 ensure_staged_artifacts() {
@@ -865,79 +586,8 @@ ensure_staged_artifacts() {
 # ================================================================================================
 
 # =============
-# Action: CLUSTER-CA (configure custom CA paths and optionally install into OS trust)
-action_cluster_ca() {
-  load_site_defaults
-
-  local ROOT_CRT="" ROOT_KEY="" INT_CRT="" INT_KEY=""
-  local INSTALL_TRUST="true"
-
-  if [[ -n "$CONFIG_FILE" ]]; then
-    ROOT_CRT="$(yaml_spec_get "$CONFIG_FILE" rootCrt || true)"
-    ROOT_KEY="$(yaml_spec_get "$CONFIG_FILE" rootKey || true)"
-    INT_CRT="$(yaml_spec_get "$CONFIG_FILE" intermediateCrt || true)"
-    INT_KEY="$(yaml_spec_get "$CONFIG_FILE" intermediateKey || true)"
-    INSTALL_TRUST="$(yaml_spec_get "$CONFIG_FILE" installToOSTrust || echo true)"
-  fi
-
-  # Resolve to absolute paths relative to SCRIPT_DIR if not absolute
-  [[ -n "$ROOT_CRT" && "${ROOT_CRT:0:1}" != "/" ]] && ROOT_CRT="$SCRIPT_DIR/$ROOT_CRT"
-  [[ -n "$ROOT_KEY" && "${ROOT_KEY:0:1}" != "/" ]] && ROOT_KEY="$SCRIPT_DIR/$ROOT_KEY"
-  [[ -n "$INT_CRT"  && "${INT_CRT:0:1}"  != "/" ]] && INT_CRT="$SCRIPT_DIR/$INT_CRT"
-  [[ -n "$INT_KEY"  && "${INT_KEY:0:1}"  != "/" ]] && INT_KEY="$SCRIPT_DIR/$INT_KEY"
-
-  # Validate files if set
-  [[ -n "$ROOT_CRT" && ! -f "$ROOT_CRT" ]] && { log ERROR "rootCrt not found: $ROOT_CRT"; exit 3; }
-  [[ -n "$ROOT_KEY" && ! -f "$ROOT_KEY" ]] && { log ERROR "rootKey not found: $ROOT_KEY"; exit 3; }
-  if [[ -z "$ROOT_KEY" && ( -n "$INT_CRT" || -n "$INT_KEY" ) ]]; then
-    [[ -n "$INT_CRT" && ! -f "$INT_CRT" ]] && { log ERROR "intermediateCrt not found: $INT_CRT"; exit 3; }
-    [[ -n "$INT_KEY" && ! -f "$INT_KEY" ]] && { log ERROR "intermediateKey not found: $INT_KEY"; exit 3; }
-  fi
-
-  # Persist into site defaults so server/add-server can use them
-  local STATE="/etc/rke2image.defaults"
-  {
-    [[ -n "$ROOT_CRT" ]] && echo "CUSTOM_CA_ROOT_CRT=\"$ROOT_CRT\""
-    [[ -n "$ROOT_KEY" ]] && echo "CUSTOM_CA_ROOT_KEY=\"$ROOT_KEY\""
-    [[ -n "$INT_CRT"  ]] && echo "CUSTOM_CA_INT_CRT=\"$INT_CRT\""
-    [[ -n "$INT_KEY"  ]] && echo "CUSTOM_CA_INT_KEY=\"$INT_KEY\""
-    if [[ "$INSTALL_TRUST" =~ ^([Tt]rue|1|yes|Y)$ ]]; then
-      echo "CUSTOM_CA_INSTALL_TO_OS_TRUST=1"
-    else
-      echo "CUSTOM_CA_INSTALL_TO_OS_TRUST=0"
-    fi
-  } >> "$STATE"
-  chmod 600 "$STATE"
-  log INFO "Saved custom CA configuration to $STATE"
-
-  # Optionally install to OS trust store now
-  if [[ "${CUSTOM_CA_INSTALL_TO_OS_TRUST:-${INSTALL_TRUST,,}}" =~ ^(1|true|yes)$ ]]; then
-    if [[ -n "$ROOT_CRT" ]]; then
-      local bn="$(basename "$ROOT_CRT")"
-      cp -f "$ROOT_CRT" "/usr/local/share/ca-certificates/$bn"
-      update-ca-certificates >>"$LOG_FILE" 2>&1 || true
-      log INFO "Installed $bn into OS trust store."
-    fi
-  fi
-
-  # Stage helper for offline (same as pull/image path)
-  if [[ -f "$DOWNLOADS_DIR/generate-custom-ca-certs.sh" ]]; then
-    cp -f "$DOWNLOADS_DIR/generate-custom-ca-certs.sh" "$STAGE_DIR/generate-custom-ca-certs.sh" || true
-    chmod +x "$STAGE_DIR/generate-custom-ca-certs.sh" || true
-  fi
-}
-
-# =============
 # Action: PULL
 action_pull() {
-  # Prefetch custom-CA helper for offline use
-  if command -v curl >/dev/null 2>&1; then
-    local GEN_URL="https://raw.githubusercontent.com/k3s-io/k3s/refs/heads/main/contrib/util/generate-custom-ca-certs.sh"
-    log INFO "Fetching custom-CA helper script for offline use."
-    curl -fsSL -o "$DOWNLOADS_DIR/generate-custom-ca-certs.sh" "$GEN_URL" >>"$LOG_FILE" 2>&1 || true
-    chmod +x "$DOWNLOADS_DIR/generate-custom-ca-certs.sh" >>"$LOG_FILE" 2>&1 || true
-  fi
-
   if [[ -n "$CONFIG_FILE" ]]; then
     RKE2_VERSION="${RKE2_VERSION:-$(yaml_spec_get "$CONFIG_FILE" rke2Version || true)}"
     REGISTRY="$(yaml_spec_get "$CONFIG_FILE" registry || echo "$REGISTRY")"
@@ -946,18 +596,17 @@ action_pull() {
     log WARN "Using YAML values; CLI flags may be overridden (pull)."
   fi
 
-  ensure_installed curl
-  ensure_installed zstd
-  ensure_installed yq
-  ensure_installed pv
-  ensure_installed ca-certificates
-
   detect_latest_rke2_version
   ensure_containerd_ready
 
   local BASE_URL="https://github.com/rancher/rke2/releases/download/${RKE2_VERSION//+/%2B}"
   mkdir -p "$DOWNLOADS_DIR"
   pushd "$DOWNLOADS_DIR" >/dev/null
+
+  ensure_installed curl
+  ensure_installed zstd
+  ensure_installed yq
+  ensure_installed ca-certificates
 
   log INFO "Downloading artifacts (images, tarball, checksums, installer)..."
   spinner_run "Downloading $IMAGES_TAR"  curl -Lf "$BASE_URL/$IMAGES_TAR"   -o "$IMAGES_TAR"
@@ -1051,13 +700,6 @@ action_push() {
 # ==============
 # Action: IMAGE
 action_image() {
-  # Stage custom-CA helper into $STAGE_DIR for offline cluster init
-  if [[ -f "$DOWNLOADS_DIR/generate-custom-ca-certs.sh" ]]; then
-    cp -f "$DOWNLOADS_DIR/generate-custom-ca-certs.sh" "$STAGE_DIR/generate-custom-ca-certs.sh" || true
-    chmod +x "$STAGE_DIR/generate-custom-ca-certs.sh" || true
-    log INFO "Staged custom-CA helper into $STAGE_DIR."
-  fi
-
   local REG_HOST="${REGISTRY%%/*}"
   local defaultDnsCsv="$DEFAULT_DNS"
   local defaultSearchCsv=""
@@ -1080,22 +722,12 @@ action_image() {
   install_rke2_prereqs
   ensure_containerd_ready
 
-  load_site_defaults
-  # Determine CA for registry and cluster trust
-  local CA_SRC=""
-  if [[ -n "${CUSTOM_CA_ROOT_CRT:-}" ]]; then
-    CA_SRC="$CUSTOM_CA_ROOT_CRT"
-  elif [[ -f "$SCRIPT_DIR/certs/kuberegistry-ca.crt" ]]; then
-    CA_SRC="$SCRIPT_DIR/certs/kuberegistry-ca.crt"
+  if [[ ! -f "$SCRIPT_DIR/certs/kuberegistry-ca.crt" ]]; then
+    log ERROR "Missing $SCRIPT_DIR/certs/kuberegistry-ca.crt"
+    exit 3
   fi
-  if [[ -n "$CA_SRC" ]]; then
-    local CA_BN="$(basename "$CA_SRC")"
-    cp -f "$CA_SRC" "/usr/local/share/ca-certificates/$CA_BN"
-    update-ca-certificates >>"$LOG_FILE" 2>&1 || true
-    log INFO "Installed $CA_BN into OS trust store."
-  else
-    log WARN "No custom CA provided; continuing without installing registry CA."
-  fi
+  cp "$SCRIPT_DIR/certs/kuberegistry-ca.crt" /usr/local/share/ca-certificates/kuberegistry-ca.crt
+  update-ca-certificates >>"$LOG_FILE" 2>&1
 
   mkdir -p /var/lib/rancher/rke2/agent/images/
   if [[ -f "$DOWNLOADS_DIR/$IMAGES_TAR" ]]; then
@@ -1138,7 +770,7 @@ configs:
       username: "$REG_USER"
       password: "$REG_PASS"
     tls:
-      ca_file: "/usr/local/share/ca-certificates/${CA_BN:-kuberegistry-ca.crt}"
+      ca_file: "/usr/local/share/ca-certificates/kuberegistry-ca.crt"
 EOF
   chmod 600 /etc/rancher/rke2/registries.yaml
 
@@ -1166,7 +798,6 @@ EOF
   log WARN "Rebooting now to complete updates."
   sleep 10
   reboot
-
 }
 
 # ==============
@@ -1214,8 +845,6 @@ action_server() {
   local SRC="$STAGE_DIR"
 
   ensure_containerd_ready
-  log INFO "Seeding custom cluster CA (if provided)..."
-  setup_custom_cluster_ca || true
   log INFO "Proceeding with offline RKE2 server install..."
   run_rke2_installer "$SRC" "server"
 
@@ -1322,112 +951,9 @@ action_agent() {
 }
 
 # ===============
-# ================
-# Action: ADD-SERVER (join existing HA control plane)
-action_add_server() {
-  load_site_defaults
-
-  local IP="" PREFIX="" HOSTNAME="" DNS="" SEARCH="" GW=""
-  local URL="" TOKEN="" TOKEN_FILE="" TLS_SANS=""
-
-  if [[ -n "$CONFIG_FILE" ]]; then
-    IP="$(yaml_spec_get "$CONFIG_FILE" ip || true)"
-    PREFIX="$(yaml_spec_get "$CONFIG_FILE" prefix || true)"
-    HOSTNAME="$(yaml_spec_get "$CONFIG_FILE" hostname || true)"
-    local d sd ts
-    d="$(yaml_spec_get "$CONFIG_FILE" dns || true)"; [[ -n "$d" ]] && DNS="$(normalize_list_csv "$d")"
-    sd="$(yaml_spec_get "$CONFIG_FILE" searchDomains || true)"; [[ -n "$sd" ]] && SEARCH="$(normalize_list_csv "$sd")"
-    GW="$(yaml_spec_get "$CONFIG_FILE" gateway || true)"
-    URL="$(yaml_spec_get "$CONFIG_FILE" serverURL || true)"
-    TOKEN="$(yaml_spec_get "$CONFIG_FILE" token || true)"
-    TOKEN_FILE="$(yaml_spec_get "$CONFIG_FILE" tokenFile || true)"
-    ts="$(yaml_spec_get "$CONFIG_FILE" tlsSans || true)"; [[ -n "$ts" ]] && TLS_SANS="$(normalize_list_csv "$ts")"
-  fi
-
-  [[ -z "$IP"       ]] && read -rp "Enter static IPv4 for this server node: " IP
-  [[ -z "$PREFIX"   ]] && read -rp "Enter subnet prefix length (0-32) [default 24]: " PREFIX
-  [[ -z "$HOSTNAME" ]] && read -rp "Enter hostname for this server node: " HOSTNAME
-  [[ -z "$GW"       ]] && read -rp "Enter default gateway IPv4 [leave blank to skip]: " GW || true
-
-  if [[ -z "$DNS" ]]; then
-    read -rp "Enter DNS IPv4s (comma-separated) [blank=default ${DEFAULT_DNS}]: " DNS || true
-    [[ -z "$DNS" ]] && DNS="$DEFAULT_DNS"
-  fi
-  if [[ -z "$SEARCH" && -n "${DEFAULT_SEARCH:-}" ]]; then
-    SEARCH="$DEFAULT_SEARCH"
-  fi
-
-  # Cluster join info
-  [[ -z "$URL" ]] && read -rp "Enter EXISTING RKE2 server URL (e.g. https://<vip-or-node>:9345): " URL
-  if [[ -z "$TOKEN" && -z "$TOKEN_FILE" ]]; then
-    read -rp "Enter cluster join token (leave blank to provide a token file path): " TOKEN || true
-    if [[ -z "$TOKEN" ]]; then
-      read -rp "Enter path to token file (e.g., /var/lib/rancher/rke2/server/node-token): " TOKEN_FILE || true
-    fi
-  fi
-  [[ -z "$TLS_SANS" ]] && read -rp "Optional TLS SANs (CSV; hostnames/IPs) [blank=skip]: " TLS_SANS || true
-
-  # Validation
-  while ! valid_ipv4 "$IP"; do read -rp "Invalid IPv4. Re-enter server IP: " IP; done
-  while ! valid_prefix "${PREFIX:-}"; do read -rp "Invalid prefix (0-32). Re-enter server prefix [default 24]: " PREFIX; done
-  while ! valid_ipv4_or_blank "${GW:-}"; do read -rp "Invalid gateway IPv4 (or blank). Re-enter: " GW; done
-  while ! valid_csv_dns "${DNS:-}"; do read -rp "Invalid DNS list. Re-enter CSV IPv4s: " DNS; done
-  while ! valid_search_domains_csv "${SEARCH:-}"; do read -rp "Invalid search domain list. Re-enter CSV: " SEARCH; done
-  [[ -z "${PREFIX:-}" ]] && PREFIX=24
-
-  ensure_staged_artifacts
-  ensure_containerd_ready
-
-  # Write RKE2 config for join
-  mkdir -p /etc/rancher/rke2
-  # Preserve existing config (system-default-registry) if present; then append join settings
-  if [[ ! -f /etc/rancher/rke2/config.yaml ]]; then
-    : > /etc/rancher/rke2/config.yaml
-  fi
-
-  {
-    echo "server: \"$URL\""
-    if [[ -n "$TOKEN_FILE" ]]; then
-      echo "token_file: \"$TOKEN_FILE\""
-    else
-      echo "token: \"$TOKEN\""
-    fi
-    if [[ -n "$TLS_SANS" ]]; then
-      echo "tls-san:"
-      IFS=',' read -r -a _sans <<<"$TLS_SANS"
-      for s in "${_sans[@]}"; do
-        s="${s//\"/}"
-        s="${s// /}"
-        [[ -n "$s" ]] && echo "  - \"$s\""
-      done
-    fi
-  } >> /etc/rancher/rke2/config.yaml
-  chmod 600 /etc/rancher/rke2/config.yaml
-
-  log INFO "RKE2 join config written to /etc/rancher/rke2/config.yaml"
-  log INFO "server: $URL"
-  if [[ -n "$TOKEN_FILE" ]]; then log INFO "token_file: $TOKEN_FILE"; else log INFO "token: (redacted)"; fi
-
-  # Install rke2-server using staged artifacts
-  local SRC="$STAGE_DIR"
-  log INFO "Seeding custom cluster CA (if first server in a cluster; safe to skip on join)..."
-  setup_custom_cluster_ca || true
-  log INFO "Installing rke2-server (join existing control plane)..."
-  run_rke2_installer "$SRC" "server"
-  systemctl enable --now rke2-server >>"$LOG_FILE" 2>&1 || true
-
-  # Basic hostname and /etc/hosts
-  hostnamectl set-hostname "$HOSTNAME"
-  if ! grep -q "$HOSTNAME" /etc/hosts; then echo "$IP $HOSTNAME" >> /etc/hosts; fi
-
-  write_netplan "$IP" "$PREFIX" "${GW:-}" "${DNS:-}" "${SEARCH:-}"
-  echo "A reboot is recommended to ensure clean state. Network is already applied."
-}
-
 # Action: VERIFY
 action_verify() {
-  load_site_defaults
-if verify_prereqs; then
+  if verify_prereqs; then
     log INFO "VERIFY PASSED: Node meets RKE2 prerequisites."
     exit 0
   else
@@ -1488,13 +1014,11 @@ fi
 ACTION="${CLI_SUB:-}"
 if [[ -n "$CONFIG_FILE" && -z "$CLI_SUB" ]]; then
   case "$YAML_KIND" in
-    Pull|pull)        ACTION="pull"        ;;
-    Push|push)        ACTION="push"        ;;
-    Image|image)      ACTION="image"       ;;
-    Server|server)    ACTION="server"      ;;
-    AddServer|add-server|addServer) ACTION="add-server" ;;
-    ClusterCA|cluster-ca|CustomCA|custom-ca) ACTION="cluster-ca" ;;
-    Agent|agent)      ACTION="agent"       ;;
+    Pull|pull)     ACTION="pull"   ;;
+    Push|push)     ACTION="push"   ;;
+    Image|image)   ACTION="image"  ;;
+    Server|server) ACTION="server" ;;
+    Agent|agent)   ACTION="agent"  ;;
     *) log ERROR "Unsupported or missing YAML kind: '${YAML_KIND:-<none>}'"; exit 5;;
   esac
 fi
@@ -1504,9 +1028,7 @@ case "${ACTION:-}" in
   push)   action_push   ;;
   image)  action_image  ;;
   server) action_server ;;
-  add-server) action_add_server ;;
   agent)  action_agent  ;;
-  cluster-ca) action_cluster_ca ;;
   verify) action_verify ;;
   *) print_help; exit 1 ;;
 esac
