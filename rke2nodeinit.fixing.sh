@@ -676,10 +676,10 @@ run_rke2_installer() {
 }
 
 setup_custom_cluster_ca() {
-  local ROOT_CRT="${CUSTOM_CA_ROOT_CRT:-$SCRIPT_DIR/certs/kuberegistry-ca.crt}"
-  local ROOT_KEY="${CUSTOM_CA_ROOT_KEY:-$SCRIPT_DIR/certs/kuberegistry-ca.key}"
-  local INT_CRT="${CUSTOM_CA_INT_CRT:-$SCRIPT_DIR/certs/kuberegistry-intermediate-ca.crt}"
-  local INT_KEY="${CUSTOM_CA_INT_KEY:-$SCRIPT_DIR/certs/kuberegistry-intermediate-ca.key}"
+  local ROOT_CRT="${CUSTOM_CA_ROOT_CRT:-$SCRIPT_DIR/certs/dev-certa001-ca-dev-local.crt}"
+  local ROOT_KEY="${CUSTOM_CA_ROOT_KEY:-$SCRIPT_DIR/certs/dev-certa001-ca-dev-local-key.pem}"
+  local INT_CRT="${CUSTOM_CA_INT_CRT:-}"
+  local INT_KEY="${CUSTOM_CA_INT_KEY:-}"
   local TLS_DIR="/var/lib/rancher/rke2/server/tls"
   local GEN1="$STAGE_DIR/generate-custom-ca-certs.sh"
   local GEN2="$DOWNLOADS_DIR/generate-custom-ca-certs.sh"
@@ -876,6 +876,16 @@ action_cluster_ca() {
   local ROOT_CRT="" ROOT_KEY="" INT_CRT="" INT_KEY=""
   local INSTALL_TRUST="true"
 
+  # Stage helper for offline (same as pull/image path and exit if not found)
+  if [[ -f "$DOWNLOADS_DIR/generate-custom-ca-certs.sh" ]]; then
+    cp -f "$DOWNLOADS_DIR/generate-custom-ca-certs.sh" "$STAGE_DIR/generate-custom-ca-certs.sh" || true
+    chmod +x "$STAGE_DIR/generate-custom-ca-certs.sh" || true
+    log INFO "Staged custom-CA helper script for offline use."
+  else
+    log ERROR "custom-CA helper script not found in $DOWNLOADS_DIR. Run 'pull' first."
+    exit 3
+  fi
+
   if [[ -n "$CONFIG_FILE" ]]; then
     ROOT_CRT="$(yaml_spec_get "$CONFIG_FILE" rootCrt || true)"
     ROOT_KEY="$(yaml_spec_get "$CONFIG_FILE" rootKey || true)"
@@ -923,12 +933,6 @@ action_cluster_ca() {
       log INFO "Installed $bn into OS trust store."
     fi
   fi
-
-  # Stage helper for offline (same as pull/image path)
-  if [[ -f "$DOWNLOADS_DIR/generate-custom-ca-certs.sh" ]]; then
-    cp -f "$DOWNLOADS_DIR/generate-custom-ca-certs.sh" "$STAGE_DIR/generate-custom-ca-certs.sh" || true
-    chmod +x "$STAGE_DIR/generate-custom-ca-certs.sh" || true
-  fi
 }
 
 # =============
@@ -940,6 +944,7 @@ action_pull() {
     log INFO "Fetching custom-CA helper script for offline use."
     curl -fsSL -o "$DOWNLOADS_DIR/generate-custom-ca-certs.sh" "$GEN_URL" >>"$LOG_FILE" 2>&1 || true
     chmod +x "$DOWNLOADS_DIR/generate-custom-ca-certs.sh" >>"$LOG_FILE" 2>&1 || true
+    log INFO "Staged custom-CA helper script for offline use."
   fi
 
   if [[ -n "$CONFIG_FILE" ]]; then
@@ -1190,10 +1195,10 @@ action_server() {
     GW="$(yaml_spec_get "$CONFIG_FILE" gateway || true)"
   fi
 
-  if [[ -z "$IP" ]];      then read -rp "Enter static IPv4 for this server node: " IP; fi
-  if [[ -z "$PREFIX" ]];  then read -rp "Enter subnet prefix length (0-32) [default 24]: " PREFIX; fi
-  if [[ -z "$HOSTNAME" ]];then read -rp "Enter hostname for this server node: " HOSTNAME; fi
-  if [[ -z "$GW" ]];      then read -rp "Enter default gateway IPv4 [leave blank to skip]: " GW || true; fi
+  if [[ -z "$IP"       ]]; then read -rp "Enter static IPv4 for this server node: " IP; fi
+  if [[ -z "$PREFIX"   ]]; then read -rp "Enter subnet prefix length (0-32) [default 24]: " PREFIX; fi
+  if [[ -z "$HOSTNAME" ]]; then read -rp "Enter hostname for this server node: " HOSTNAME; fi
+  if [[ -z "$GW"       ]]; then read -rp "Enter default gateway IPv4 [leave blank to skip]: " GW || true; fi
   log INFO "Gateway entered (server): ${GW:-<none>}"
 
   if [[ -z "$DNS" ]]; then
