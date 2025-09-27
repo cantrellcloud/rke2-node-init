@@ -554,12 +554,16 @@ load_site_defaults() {
 install_rke2_prereqs() {
   log INFO "Installing RKE2 prereqs (iptables-nft, modules, sysctl, swapoff)"
   export DEBIAN_FRONTEND=noninteractive
-  apt-get update -y >>"$LOG_FILE" 2>&1
+  log INFO "Updating APT package cache"
+  spinner_run "Updating APT package cache" apt-get update -y # >>"$LOG_FILE" 2>&1
+  log INFO "Upgrading APT packages"
   apt-get upgrade -y >>"$LOG_FILE" 2>&1
-  apt-get autoremove -y >>"$LOG_FILE" 2>&1
+  log INFO "Installing required packages"
   apt-get install -y \
     curl ca-certificates iptables nftables ethtool socat conntrack iproute2 \
     ebtables openssl tar gzip zstd jq >>"$LOG_FILE" 2>&1
+  log INFO "Removing unnecessary packages"
+  apt-get autoremove -y >>"$LOG_FILE" 2>&1
 
   if update-alternatives --list iptables >/dev/null 2>&1; then
     update-alternatives --set iptables  /usr/sbin/iptables-nft >>"$LOG_FILE" 2>&1 || true
@@ -949,7 +953,7 @@ action_pull() {
   ensure_installed curl
   ensure_installed zstd
   ensure_installed yq
-  ensure_installed pv
+  #ensure_installed pv
   ensure_installed ca-certificates
 
   detect_latest_rke2_version
