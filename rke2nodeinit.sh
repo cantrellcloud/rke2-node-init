@@ -433,8 +433,8 @@ ensure_containerd_ready() {
       log WARN "containerd + nerdctl not ready; installing the official FULL bundle (online)."
       install_containerd_nerdctl_full
     fi
-  fi
-  # Namespace used by Kubernetes
+  fi  # Namespace used by Kubernetes
+
   if ! nerdctl --namespace k8s.io images >/dev/null 2>&1; then
     nerdctl --namespace k8s.io images >/dev/null 2>&1 || true
   fi
@@ -884,12 +884,208 @@ ensure_staged_artifacts() {
   fi
 }
 
+setup_image_resolution_strategy() {
+  # Read primary and fallback registries from YAML (if present), else derive from existing variables.
+  local primary_registry="" fallback_registry="" default_offline_registry="" primary_host="" fallback_host="" default_host=""
+  local reg_user="${REG_USER:-}" reg_pass="${REG_PASS:-}" ca_guess=""
+
+  if [[ -n "$CONFIG_FILE" ]]; then
+    primary_registry="$(yaml_spec_get "$CONFIG_FILE" registry || echo "${REGISTRY:-}")"
+    fallback_registry="$(yaml_spec_get "$CONFIG_FILE" fallbackRegistry || true)"
+    default_offline_registry="$(yaml_spec_get "$CONFIG_FILE" defaultOfflineRegistry || true)"
+    # Optional pinned IPs for /etc/hosts
+    local primary_ip fallback_ip
+    primary_ip="$(yaml_spec_get "$CONFIG_FILE" registryIP || true)"
+    fallback_ip="$(yaml_spec_get "$CONFIG_FILE" fallbackRegistryIP || true)"
+    ensure_hosts_pin "${primary_registry%%/*}" "${primary_ip}"
+    ensure_hosts_pin "${fallback_registry%%/*}" "${fallback_ip}"
+    # Possible credentials
+    reg_user="$(yaml_spec_get "$CONFIG_FILE" registryUsername || echo "${reg_user}")"
+    reg_pass="$(yaml_spec_get "$CONFIG_FILE" registryPassword || echo "${reg_pass}")"
+  fi
+
+  # Fallbacks if still empty
+  primary_registry="${primary_registry:-${REGISTRY:-'kuberegistry.dev.kube/rke2'}}"
+  primary_host="${primary_registry%%/*}"
+  [[ -n "$fallback_registry" ]]        && fallback_host="${fallback_registry%%/*}"        || fallback_host=""
+  [[ -n "$default_offline_registry" ]] && default_host="${default_offline_registry%%/*}"  || default_host=""
+
+  # Try to reuse existing registry CA if present
+  if [[ -f /etc/rancher/rke2/registries.yaml ]]; then
+    ca_guess="$(awk -F': *' '/ca_file:/ {gsub(/"/,"",$2); print $2; exit}' /etc/rancher/rke2/registries.yaml 2>/dev/null || true)"
+  fi
+  [[ -z "$ca_guess" && -f /usr/local/share/ca-certificates/kuberegistry-ca.crt ]] && ca_guess="/usr/local/share/ca-certificates/kuberegistry-ca.crt"
+
+  # 1) Load staged images, 2) Retag locally with the primary host so containerd finds them without network
+  load_staged_images
+  retag_local_images_with_prefix "$primary_host"
+
+  # 3) Mirror upstreams to offline endpoints, in order (primary → fallback → default)
+  write_registries_yaml_with_fallbacks "$primary_host" "$fallback_host" "$default_host" "$reg_user" "$reg_pass" "$ca_guess"
+
+  # 4) Ensure system-default-registry matches the primary host (so RKE2 will try it)
+  #mkdir -p /etc/rancher/rke2
+  #if ! grep -q '^system-default-registry:' /etc/rancher/rke2/config.yaml 2>/dev/null; then
+  #  echo "system-default-registry: \"$primary_host\"" >> /etc/rancher/rke2/config.yaml
+  #else
+  #  sed -i -E "s|^system-default-registry:.*$|system-default-registry: \"${primary_host}\"|g" /etc/rancher/rke2/config.yaml
+  #fi
+  #log INFO "Set system-default-registry: ${primary_host}"
+  # NOTE: Do not force system-default-registry here.
+  # If we set it, we must have already retagged every cached image to ${primary_host}/...
+  # Retagging happens above; leaving system-default-registry unset ensures cached upstream names match.
+  :
+}
+
+
+# ---------- Image resolution strategy (local → offline registry(s)) ----------------------------
+# Ensures that: 1) staged images are loaded, 2) local images are retagged to match the
+# system-default-registry prefix so containerd will use them without pulling, and
+# 3) registries.yaml mirrors point to your offline registry endpoints in priority order.
+image_exists_locally() {
+  local ref="$1"
+  nerdctl --namespace k8s.io image inspect "$ref" >/dev/null 2>&1
+}
+
+load_staged_images() {
+  # Load any pre-staged images into containerd so we can retag them.
+  shopt -s nullglob
+  local loaded=0
+  for f in /var/lib/rancher/rke2/agent/images/*.tar*; do
+    case "$f" in
+      *.zst)  zstdcat "$f" | nerdctl --namespace k8s.io load >/dev/null 2>&1 || true ;;
+      *.gz)   gzip -dc "$f" | nerdctl --namespace k8s.io load >/dev/null 2>&1 || true ;;
+      *.tar)  nerdctl --namespace k8s.io load -i "$f" >/dev/null 2>&1 || true ;;
+    esac
+    loaded=1
+  done
+  shopt -u nullglob
+  if (( loaded == 1 )); then
+    log INFO "Loaded staged images into containerd namespace k8s.io."
+  else
+    log INFO "No staged images to load (skip)."
+  fi
+}
+
+retag_local_images_with_prefix() {
+  # Give every locally available image an additional name that includes the private registry host.
+  # This guarantees kubelet/containerd can find the content locally when it asks for
+  # e.g. <regHost>/rancher/mirrored-pause:3.6.
+  local reg_host="$1"
+  [[ -z "$reg_host" ]] && return 0
+
+  # Make a best effort and stay quiet on errors
+  mapfile -t imgs < <(nerdctl --namespace k8s.io images --format '{{.Repository}}:{{.Tag}}' \
+                      | awk '$0 !~ /<none>/' | sort -u)
+  local ref
+  for ref in "${imgs[@]}"; do
+    [[ -z "$ref" ]] && continue
+    case "$ref" in
+      "$reg_host"/*) : ;; # already retagged with prefix
+      *"@sha256:"*)  : ;; # skip digested names
+      *"<none>"*)    : ;; # skip invalid
+      *:*)           nerdctl --namespace k8s.io tag "$ref" "$reg_host/$ref" >/dev/null 2>&1 || true ;;
+      *)             : ;;
+    esac
+  done
+  log INFO "Retagged local images with registry prefix: $reg_host/… (best-effort)."
+}
+
+ensure_hosts_pin() {
+  # Optionally force-resolve a registry name when DNS is not yet populated.
+  local host="$1" ip="$2"
+  [[ -z "$host" || -z "$ip" ]] && return 0
+  if ! grep -qE "^[[:space:]]*$ip[[:space:]]+$host(\s|$)" /etc/hosts; then
+    echo "$ip $host" >> /etc/hosts
+    log INFO "Pinned $host → $ip in /etc/hosts"
+  fi
+}
+
+write_registries_yaml_with_fallbacks() {
+  # Build a registries.yaml that points common upstreams to your offline endpoints in priority order.
+  # Args: primary_host [fallback_host] [default_offline_host] [username] [password] [ca_file]
+  local primary="$1"; shift || true
+  local fallback="$1"; shift || true
+  local default_offline="$1"; shift || true
+  local user="$1"; shift || true
+  local pass="$1"; shift || true
+  local ca_file="$1"; shift || true
+
+  mkdir -p /etc/rancher/rke2
+
+  # Build endpoint YAML list
+  endpoints_primary="      - \"https://${primary}\""
+  endpoints_fallback=""
+  endpoints_default=""
+  [[ -n "$fallback" ]]        && endpoints_fallback=$'\n'"      - \"https://${fallback}\""
+  [[ -n "$default_offline" ]] && endpoints_default=$'\n'"      - \"https://${default_offline}\""
+
+  # CA line (optional)
+  tls_block_primary=""
+  tls_block_fallback=""
+  tls_block_default=""
+  if [[ -n "$ca_file" && -f "$ca_file" ]]; then
+    tls_block_primary=$'\n'"    tls:"$'\n'"      ca_file: \"${ca_file}\""
+    tls_block_fallback=$'\n'"    tls:"$'\n'"      ca_file: \"${ca_file}\""
+    tls_block_default=$'\n'"    tls:"$'\n'"      ca_file: \"${ca_file}\""
+  fi
+
+  # Auth (optional)
+  auth_block_primary=""
+  auth_block_fallback=""
+  auth_block_default=""
+  if [[ -n "$user" && -n "$pass" ]]; then
+    auth_block_primary=$'\n'"    auth:"$'\n'"      username: \"${user}\""$'\n'"      password: \"${pass}\""
+    auth_block_fallback=$'\n'"    auth:"$'\n'"      username: \"${user}\""$'\n'"      password: \"${pass}\""
+    auth_block_default=$'\n'"    auth:"$'\n'"      username: \"${user}\""$'\n'"      password: \"${pass}\""
+  fi
+
+  # Known upstreams we want to mirror via offline registry
+  # Known upstreams we want to mirror via offline registry
+  REG_YAML="$(cat <<EOF
+mirrors:
+  "docker.io":
+    endpoint:
+${endpoints_primary}${endpoints_fallback}${endpoints_default}
+  "registry.k8s.io":
+    endpoint:
+${endpoints_primary}${endpoints_fallback}${endpoints_default}
+  "k8s.gcr.io":
+    endpoint:
+${endpoints_primary}${endpoints_fallback}${endpoints_default}
+  "quay.io":
+    endpoint:
+${endpoints_primary}${endpoints_fallback}${endpoints_default}
+  "ghcr.io":
+    endpoint:
+${endpoints_primary}${endpoints_fallback}${endpoints_default}
+  "rancher":
+    endpoint:
+${endpoints_primary}${endpoints_fallback}${endpoints_default}
+configs:
+  "${primary}":${auth_block_primary}${tls_block_primary}
+EOF
+)"
+
+  # Optionally add configs for fallback/default
+  if [[ -n "$fallback" ]]; then
+    REG_YAML+=$'\n'"  \"${fallback}\":${auth_block_fallback}${tls_block_fallback}"
+  fi
+  if [[ -n "$default_offline" ]]; then
+    REG_YAML+=$'\n'"  \"${default_offline}\":${auth_block_default}${tls_block_default}"
+  fi
+
+  printf "%s\n" "${REG_YAML}" > /etc/rancher/rke2/registries.yaml
+  chmod 600 /etc/rancher/rke2/registries.yaml
+  log INFO "Wrote /etc/rancher/rke2/registries.yaml with endpoints (priority): ${primary}${fallback:+, ${fallback}}${default_offline:+, ${default_offline}}"
+}
+
 # ================================================================================================
 # ACTIONS
 # ================================================================================================
 
-# =============
-# Action: CLUSTER-CA (configure custom CA paths and optionally install into OS trust)
+# ==================
+# Action: CLUSTER-CA
 action_cluster_ca() {
   load_site_defaults
 
@@ -980,6 +1176,25 @@ action_pull() {
   ensure_installed yq
   #ensure_installed pv
   ensure_installed ca-certificates
+
+# --- Cache nerdctl FULL bundle for offline use ---
+  log INFO "Detecting latest nerdctl FULL release (to cache offline)..."
+  local api="https://api.github.com/repos/containerd/nerdctl/releases/latest"
+  local ntag nver nurl ntgz
+  ntag="$(curl -fsSL "$api" | grep -Po '"tag_name":\s*"\K[^"]+' || true)"
+  if [[ -n "$ntag" ]]; then
+    nver="${ntag#v}"
+    nurl="https://github.com/containerd/nerdctl/releases/download/${ntag}/nerdctl-full-${nver}-linux-${ARCH}.tar.gz"
+    ntgz="$DOWNLOADS_DIR/nerdctl-full-${nver}-linux-${ARCH}.tar.gz"
+    if [[ ! -f "$ntgz" ]]; then
+      spinner_run "Caching nerdctl FULL ${ntag}" curl -Lf "$nurl" -o "$ntgz"
+      log INFO "Cached nerdctl FULL: $(basename "$ntgz")"
+    else
+      log INFO "nerdctl FULL already cached: $(basename "$ntgz")"
+    fi
+  else
+    log WARN "Could not detect nerdctl release; skipping offline cache."
+  fi
 
   detect_latest_rke2_version
   ensure_containerd_ready
@@ -1153,23 +1368,37 @@ action_image() {
     log WARN "SHA256 file not found; run 'pull' first."
   fi
 
-  mkdir -p /etc/rancher/rke2/
-  printf 'system-default-registry: "%s"\n' "$REG_HOST" > /etc/rancher/rke2/config.yaml
+  #mkdir -p /etc/rancher/rke2/
+  #printf 'system-default-registry: "%s"\n' "$REG_HOST" > /etc/rancher/rke2/config.yaml
 
-  cat > /etc/rancher/rke2/registries.yaml <<EOF
-mirrors:
-  "docker.io":
-    endpoint:
-      - "https://$REG_HOST"
-configs:
-  "$REG_HOST":
-    auth:
-      username: "$REG_USER"
-      password: "$REG_PASS"
-    tls:
-      ca_file: "/usr/local/share/ca-certificates/${CA_BN:-kuberegistry-ca.crt}"
-EOF
-  chmod 600 /etc/rancher/rke2/registries.yaml
+  #cat > /etc/rancher/rke2/registries.yaml <<EOF
+#mirrors:
+#  "docker.io":
+#    endpoint:
+#      - "https://$REG_HOST"
+#configs:
+#  "$REG_HOST":
+#    auth:
+#      username: "$REG_USER"
+#      password: "$REG_PASS"
+#    tls:
+#      ca_file: "/usr/local/share/ca-certificates/${CA_BN:-kuberegistry-ca.crt}"
+#EOF
+#  chmod 600 /etc/rancher/rke2/registries.yaml
+
+  # Do NOT set system-default-registry here. We want the server to bootstrap
+  # from the cached upstream image names shipped in the tarball.
+  # If a private/offline registry is provided, write a full mirrors file so pulls
+  # (only when truly needed) will go to the offline endpoints.
+  mkdir -p /etc/rancher/rke2
+  : > /etc/rancher/rke2/config.yaml
+  if [[ -n "$REG_HOST" ]]; then
+    # Use the comprehensive mirrors writer so non-docker.io registries are covered too.
+    write_registries_yaml_with_fallbacks "$REG_HOST" "" "" "$REG_USER" "$REG_PASS" "/usr/local/share/ca-certificates/${CA_BN:-kuberegistry-ca.crt}"
+  else
+    # No registry configured → ensure no registries.yaml exists to avoid accidental pulls.
+    rm -f /etc/rancher/rke2/registries.yaml
+  fi
 
   cat > /etc/sysctl.d/99-disable-ipv6.conf <<'EOF'
 net.ipv6.conf.all.disable_ipv6 = 1
@@ -1196,195 +1425,6 @@ EOF
   sleep 10
   reboot
 
-}
-
-# ---------- Image resolution strategy (local → offline registry(s)) ----------------------------
-# Ensures that: 1) staged images are loaded, 2) local images are retagged to match the
-# system-default-registry prefix so containerd will use them without pulling, and
-# 3) registries.yaml mirrors point to your offline registry endpoints in priority order.
-image_exists_locally() {
-  local ref="$1"
-  nerdctl --namespace k8s.io image inspect "$ref" >/dev/null 2>&1
-}
-
-load_staged_images() {
-  # Load any pre-staged images into containerd so we can retag them.
-  shopt -s nullglob
-  local loaded=0
-  for f in /var/lib/rancher/rke2/agent/images/*.tar*; do
-    case "$f" in
-      *.zst)  zstdcat "$f" | nerdctl --namespace k8s.io load >/dev/null 2>&1 || true ;;
-      *.gz)   gzip -dc "$f" | nerdctl --namespace k8s.io load >/dev/null 2>&1 || true ;;
-      *.tar)  nerdctl --namespace k8s.io load -i "$f" >/dev/null 2>&1 || true ;;
-    esac
-    loaded=1
-  done
-  shopt -u nullglob
-  if (( loaded == 1 )); then
-    log INFO "Loaded staged images into containerd namespace k8s.io."
-  else
-    log INFO "No staged images to load (skip)."
-  fi
-}
-
-retag_local_images_with_prefix() {
-  # Give every locally available image an additional name that includes the private registry host.
-  # This guarantees kubelet/containerd can find the content locally when it asks for
-  # e.g. <regHost>/rancher/mirrored-pause:3.6.
-  local reg_host="$1"
-  [[ -z "$reg_host" ]] && return 0
-
-  # Make a best effort and stay quiet on errors
-  mapfile -t imgs < <(nerdctl --namespace k8s.io images --format '{{.Repository}}:{{.Tag}}' \
-                      | awk '$0 !~ /<none>/' | sort -u)
-  local ref
-  for ref in "${imgs[@]}"; do
-    [[ -z "$ref" ]] && continue
-    case "$ref" in
-      "$reg_host"/*) : ;; # already retagged with prefix
-      *"@sha256:"*)  : ;; # skip digested names
-      *"<none>"*)    : ;; # skip invalid
-      *:*)           nerdctl --namespace k8s.io tag "$ref" "$reg_host/$ref" >/dev/null 2>&1 || true ;;
-      *)             : ;;
-    esac
-  done
-  log INFO "Retagged local images with registry prefix: $reg_host/… (best-effort)."
-}
-
-ensure_hosts_pin() {
-  # Optionally force-resolve a registry name when DNS is not yet populated.
-  local host="$1" ip="$2"
-  [[ -z "$host" || -z "$ip" ]] && return 0
-  if ! grep -qE "^[[:space:]]*$ip[[:space:]]+$host(\s|$)" /etc/hosts; then
-    echo "$ip $host" >> /etc/hosts
-    log INFO "Pinned $host → $ip in /etc/hosts"
-  fi
-}
-
-write_registries_yaml_with_fallbacks() {
-  # Build a registries.yaml that points common upstreams to your offline endpoints in priority order.
-  # Args: primary_host [fallback_host] [default_offline_host] [username] [password] [ca_file]
-  local primary="$1"; shift || true
-  local fallback="$1"; shift || true
-  local default_offline="$1"; shift || true
-  local user="$1"; shift || true
-  local pass="$1"; shift || true
-  local ca_file="$1"; shift || true
-
-  mkdir -p /etc/rancher/rke2
-
-  # Build endpoint YAML list
-  endpoints_primary="      - \"https://${primary}\""
-  endpoints_fallback=""
-  endpoints_default=""
-  [[ -n "$fallback" ]]        && endpoints_fallback=$'\n'"      - \"https://${fallback}\""
-  [[ -n "$default_offline" ]] && endpoints_default=$'\n'"      - \"https://${default_offline}\""
-
-  # CA line (optional)
-  tls_block_primary=""
-  tls_block_fallback=""
-  tls_block_default=""
-  if [[ -n "$ca_file" && -f "$ca_file" ]]; then
-    tls_block_primary=$'\n'"    tls:"$'\n'"      ca_file: \"${ca_file}\""
-    tls_block_fallback=$'\n'"    tls:"$'\n'"      ca_file: \"${ca_file}\""
-    tls_block_default=$'\n'"    tls:"$'\n'"      ca_file: \"${ca_file}\""
-  fi
-
-  # Auth (optional)
-  auth_block_primary=""
-  auth_block_fallback=""
-  auth_block_default=""
-  if [[ -n "$user" && -n "$pass" ]]; then
-    auth_block_primary=$'\n'"    auth:"$'\n'"      username: \"${user}\""$'\n'"      password: \"${pass}\""
-    auth_block_fallback=$'\n'"    auth:"$'\n'"      username: \"${user}\""$'\n'"      password: \"${pass}\""
-    auth_block_default=$'\n'"    auth:"$'\n'"      username: \"${user}\""$'\n'"      password: \"${pass}\""
-  fi
-
-  # Known upstreams we want to mirror via offline registry
-  read -r -d '' REG_YAML <<EOF
-mirrors:
-  "docker.io":
-    endpoint:
-${endpoints_primary}${endpoints_fallback}${endpoints_default}
-  "registry.k8s.io":
-    endpoint:
-${endpoints_primary}${endpoints_fallback}${endpoints_default}
-  "k8s.gcr.io":
-    endpoint:
-${endpoints_primary}${endpoints_fallback}${endpoints_default}
-  "quay.io":
-    endpoint:
-${endpoints_primary}${endpoints_fallback}${endpoints_default}
-  "ghcr.io":
-    endpoint:
-${endpoints_primary}${endpoints_fallback}${endpoints_default}
-  "rancher":
-    endpoint:
-${endpoints_primary}${endpoints_fallback}${endpoints_default}
-configs:
-  "${primary}":${auth_block_primary}${tls_block_primary}
-EOF
-
-  # Optionally add configs for fallback/default
-  if [[ -n "$fallback" ]]; then
-    REG_YAML+=$'\n'"  \"${fallback}\":${auth_block_fallback}${tls_block_fallback}"
-  fi
-  if [[ -n "$default_offline" ]]; then
-    REG_YAML+=$'\n'"  \"${default_offline}\":${auth_block_default}${tls_block_default}"
-  fi
-
-  printf "%s\n" "${REG_YAML}" > /etc/rancher/rke2/registries.yaml
-  chmod 600 /etc/rancher/rke2/registries.yaml
-  log INFO "Wrote /etc/rancher/rke2/registries.yaml with endpoints (priority): ${primary}${fallback:+, ${fallback}}${default_offline:+, ${default_offline}}"
-}
-
-setup_image_resolution_strategy() {
-  # Read primary and fallback registries from YAML (if present), else derive from existing variables.
-  local primary_registry="" fallback_registry="" default_offline_registry="" primary_host="" fallback_host="" default_host=""
-  local reg_user="${REG_USER:-}" reg_pass="${REG_PASS:-}" ca_guess=""
-
-  if [[ -n "$CONFIG_FILE" ]]; then
-    primary_registry="$(yaml_spec_get "$CONFIG_FILE" registry || echo "${REGISTRY:-}")"
-    fallback_registry="$(yaml_spec_get "$CONFIG_FILE" fallbackRegistry || true)"
-    default_offline_registry="$(yaml_spec_get "$CONFIG_FILE" defaultOfflineRegistry || true)"
-    # Optional pinned IPs for /etc/hosts
-    local primary_ip fallback_ip
-    primary_ip="$(yaml_spec_get "$CONFIG_FILE" registryIP || true)"
-    fallback_ip="$(yaml_spec_get "$CONFIG_FILE" fallbackRegistryIP || true)"
-    ensure_hosts_pin "${primary_registry%%/*}" "${primary_ip}"
-    ensure_hosts_pin "${fallback_registry%%/*}" "${fallback_ip}"
-    # Possible credentials
-    reg_user="$(yaml_spec_get "$CONFIG_FILE" registryUsername || echo "${reg_user}")"
-    reg_pass="$(yaml_spec_get "$CONFIG_FILE" registryPassword || echo "${reg_pass}")"
-  fi
-
-  # Fallbacks if still empty
-  primary_registry="${primary_registry:-${REGISTRY:-kuberegistry.dev.kube}}"
-  primary_host="${primary_registry%%/*}"
-  [[ -n "$fallback_registry" ]]        && fallback_host="${fallback_registry%%/*}"        || fallback_host=""
-  [[ -n "$default_offline_registry" ]] && default_host="${default_offline_registry%%/*}"  || default_host=""
-
-  # Try to reuse existing registry CA if present
-  if [[ -f /etc/rancher/rke2/registries.yaml ]]; then
-    ca_guess="$(awk -F': *' '/ca_file:/ {gsub(/"/,"",$2); print $2; exit}' /etc/rancher/rke2/registries.yaml 2>/dev/null || true)"
-  fi
-  [[ -z "$ca_guess" && -f /usr/local/share/ca-certificates/kuberegistry-ca.crt ]] && ca_guess="/usr/local/share/ca-certificates/kuberegistry-ca.crt"
-
-  # 1) Load staged images, 2) Retag locally with the primary host so containerd finds them without network
-  load_staged_images
-  retag_local_images_with_prefix "$primary_host"
-
-  # 3) Mirror upstreams to offline endpoints, in order (primary → fallback → default)
-  write_registries_yaml_with_fallbacks "$primary_host" "$fallback_host" "$default_host" "$reg_user" "$reg_pass" "$ca_guess"
-
-  # 4) Ensure system-default-registry matches the primary host (so RKE2 will try it)
-  mkdir -p /etc/rancher/rke2
-  if ! grep -q '^system-default-registry:' /etc/rancher/rke2/config.yaml 2>/dev/null; then
-    echo "system-default-registry: \"$primary_host\"" >> /etc/rancher/rke2/config.yaml
-  else
-    sed -i -E "s|^system-default-registry:.*$|system-default-registry: \"${primary_host}\"|g" /etc/rancher/rke2/config.yaml
-  fi
-  log INFO "Set system-default-registry: ${primary_host}"
 }
 
 # ==============
@@ -1433,7 +1473,16 @@ action_server() {
 
   ensure_containerd_ready
   # Ensure local images and registries fallback chain are in place
-  setup_image_resolution_strategy
+  #setup_image_resolution_strategy
+  # Ensure local images win first; if a registry is configured, also retag and write mirrors
+  if [[ -f "$CONFIG_FILE" ]] && [[ -n "$(yaml_spec_get "$CONFIG_FILE" registry || true)" ]]; then
+    setup_image_resolution_strategy
+  else
+    # No registry configured: make sure system-default-registry is not set, and no registries.yaml
+    sed -i '/^system-default-registry:/d' /etc/rancher/rke2/config.yaml 2>/dev/null || true
+    rm -f /etc/rancher/rke2/registries.yaml 2>/dev/null || true
+  fi
+
   log INFO "Seeding custom cluster CA (if provided)..."
   setup_custom_cluster_ca || true
   log INFO "Proceeding with offline RKE2 server install..."
@@ -1515,7 +1564,7 @@ action_agent() {
 
   ensure_containerd_ready
   # Ensure local images and registries fallback chain are in place
-  setup_image_resolution_strategy
+  #setup_image_resolution_strategy
   log INFO "Proceeding with offline RKE2 agent install..."
   run_rke2_installer "$SRC" "agent"
 
