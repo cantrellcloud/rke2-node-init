@@ -1504,7 +1504,7 @@ action_server() {
 
   ensure_containerd_ready
   # Ensure local images and registries fallback chain are in place
-  setup_image_resolution_strategy
+  #setup_image_resolution_strategy
   log INFO "Seeding custom cluster CA (if provided)..."
   setup_custom_cluster_ca || true
   log INFO "Proceeding with offline RKE2 server install..."
@@ -1586,7 +1586,7 @@ action_agent() {
 
   ensure_containerd_ready
   # Ensure local images and registries fallback chain are in place
-  setup_image_resolution_strategy
+  #setup_image_resolution_strategy
   log INFO "Proceeding with offline RKE2 agent install..."
   run_rke2_installer "$SRC" "agent"
 
