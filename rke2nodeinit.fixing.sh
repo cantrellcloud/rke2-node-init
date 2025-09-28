@@ -905,7 +905,7 @@ setup_image_resolution_strategy() {
   fi
 
   # Fallbacks if still empty
-  primary_registry="${primary_registry:-${REGISTRY:-kuberegistry.dev.kube}}"
+  primary_registry="${primary_registry:-${REGISTRY:-'kuberegistry.dev.kube/rke2'}}"
   primary_host="${primary_registry%%/*}"
   [[ -n "$fallback_registry" ]]        && fallback_host="${fallback_registry%%/*}"        || fallback_host=""
   [[ -n "$default_offline_registry" ]] && default_host="${default_offline_registry%%/*}"  || default_host=""
