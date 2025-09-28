@@ -1037,7 +1037,8 @@ write_registries_yaml_with_fallbacks() {
   fi
 
   # Known upstreams we want to mirror via offline registry
-  read -r -d '' REG_YAML <<EOF
+  # Known upstreams we want to mirror via offline registry
+  REG_YAML="$(cat <<EOF
 mirrors:
   "docker.io":
     endpoint:
@@ -1060,6 +1061,7 @@ ${endpoints_primary}${endpoints_fallback}${endpoints_default}
 configs:
   "${primary}":${auth_block_primary}${tls_block_primary}
 EOF
+)"
 
   # Optionally add configs for fallback/default
   if [[ -n "$fallback" ]]; then
