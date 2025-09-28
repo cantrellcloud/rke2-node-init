@@ -924,13 +924,17 @@ setup_image_resolution_strategy() {
   write_registries_yaml_with_fallbacks "$primary_host" "$fallback_host" "$default_host" "$reg_user" "$reg_pass" "$ca_guess"
 
   # 4) Ensure system-default-registry matches the primary host (so RKE2 will try it)
-  mkdir -p /etc/rancher/rke2
-  if ! grep -q '^system-default-registry:' /etc/rancher/rke2/config.yaml 2>/dev/null; then
-    echo "system-default-registry: \"$primary_host\"" >> /etc/rancher/rke2/config.yaml
-  else
-    sed -i -E "s|^system-default-registry:.*$|system-default-registry: \"${primary_host}\"|g" /etc/rancher/rke2/config.yaml
-  fi
-  log INFO "Set system-default-registry: ${primary_host}"
+  #mkdir -p /etc/rancher/rke2
+  #if ! grep -q '^system-default-registry:' /etc/rancher/rke2/config.yaml 2>/dev/null; then
+  #  echo "system-default-registry: \"$primary_host\"" >> /etc/rancher/rke2/config.yaml
+  #else
+  #  sed -i -E "s|^system-default-registry:.*$|system-default-registry: \"${primary_host}\"|g" /etc/rancher/rke2/config.yaml
+  #fi
+  #log INFO "Set system-default-registry: ${primary_host}"
+  # NOTE: Do not force system-default-registry here.
+  # If we set it, we must have already retagged every cached image to ${primary_host}/...
+  # Retagging happens above; leaving system-default-registry unset ensures cached upstream names match.
+  :
 }
 
 
@@ -1076,61 +1080,12 @@ EOF
   log INFO "Wrote /etc/rancher/rke2/registries.yaml with endpoints (priority): ${primary}${fallback:+, ${fallback}}${default_offline:+, ${default_offline}}"
 }
 
-setup_image_resolution_strategy() {
-  # Read primary and fallback registries from YAML (if present), else derive from existing variables.
-  local primary_registry="" fallback_registry="" default_offline_registry="" primary_host="" fallback_host="" default_host=""
-  local reg_user="${REG_USER:-}" reg_pass="${REG_PASS:-}" ca_guess=""
-
-  if [[ -n "$CONFIG_FILE" ]]; then
-    primary_registry="$(yaml_spec_get "$CONFIG_FILE" registry || echo "${REGISTRY:-}")"
-    fallback_registry="$(yaml_spec_get "$CONFIG_FILE" fallbackRegistry || true)"
-    default_offline_registry="$(yaml_spec_get "$CONFIG_FILE" defaultOfflineRegistry || true)"
-    # Optional pinned IPs for /etc/hosts
-    local primary_ip fallback_ip
-    primary_ip="$(yaml_spec_get "$CONFIG_FILE" registryIP || true)"
-    fallback_ip="$(yaml_spec_get "$CONFIG_FILE" fallbackRegistryIP || true)"
-    ensure_hosts_pin "${primary_registry%%/*}" "${primary_ip}"
-    ensure_hosts_pin "${fallback_registry%%/*}" "${fallback_ip}"
-    # Possible credentials
-    reg_user="$(yaml_spec_get "$CONFIG_FILE" registryUsername || echo "${reg_user}")"
-    reg_pass="$(yaml_spec_get "$CONFIG_FILE" registryPassword || echo "${reg_pass}")"
-  fi
-
-  # Fallbacks if still empty
-  primary_registry="${primary_registry:-${REGISTRY:-kuberegistry.dev.kube}}"
-  primary_host="${primary_registry%%/*}"
-  [[ -n "$fallback_registry" ]]        && fallback_host="${fallback_registry%%/*}"        || fallback_host=""
-  [[ -n "$default_offline_registry" ]] && default_host="${default_offline_registry%%/*}"  || default_host=""
-
-  # Try to reuse existing registry CA if present
-  if [[ -f /etc/rancher/rke2/registries.yaml ]]; then
-    ca_guess="$(awk -F': *' '/ca_file:/ {gsub(/"/,"",$2); print $2; exit}' /etc/rancher/rke2/registries.yaml 2>/dev/null || true)"
-  fi
-  [[ -z "$ca_guess" && -f /usr/local/share/ca-certificates/kuberegistry-ca.crt ]] && ca_guess="/usr/local/share/ca-certificates/kuberegistry-ca.crt"
-
-  # 1) Load staged images, 2) Retag locally with the primary host so containerd finds them without network
-  load_staged_images
-  retag_local_images_with_prefix "$primary_host"
-
-  # 3) Mirror upstreams to offline endpoints, in order (primary → fallback → default)
-  write_registries_yaml_with_fallbacks "$primary_host" "$fallback_host" "$default_host" "$reg_user" "$reg_pass" "$ca_guess"
-
-  # 4) Ensure system-default-registry matches the primary host (so RKE2 will try it)
-  mkdir -p /etc/rancher/rke2
-  if ! grep -q '^system-default-registry:' /etc/rancher/rke2/config.yaml 2>/dev/null; then
-    echo "system-default-registry: \"$primary_host\"" >> /etc/rancher/rke2/config.yaml
-  else
-    sed -i -E "s|^system-default-registry:.*$|system-default-registry: \"${primary_host}\"|g" /etc/rancher/rke2/config.yaml
-  fi
-  log INFO "Set system-default-registry: ${primary_host}"
-}
-
 # ================================================================================================
 # ACTIONS
 # ================================================================================================
 
-# =============
-# Action: CLUSTER-CA (configure custom CA paths and optionally install into OS trust)
+# ==================
+# Action: CLUSTER-CA
 action_cluster_ca() {
   load_site_defaults
 
@@ -1413,23 +1368,37 @@ action_image() {
     log WARN "SHA256 file not found; run 'pull' first."
   fi
 
-  mkdir -p /etc/rancher/rke2/
-  printf 'system-default-registry: "%s"\n' "$REG_HOST" > /etc/rancher/rke2/config.yaml
+  #mkdir -p /etc/rancher/rke2/
+  #printf 'system-default-registry: "%s"\n' "$REG_HOST" > /etc/rancher/rke2/config.yaml
 
-  cat > /etc/rancher/rke2/registries.yaml <<EOF
-mirrors:
-  "docker.io":
-    endpoint:
-      - "https://$REG_HOST"
-configs:
-  "$REG_HOST":
-    auth:
-      username: "$REG_USER"
-      password: "$REG_PASS"
-    tls:
-      ca_file: "/usr/local/share/ca-certificates/${CA_BN:-kuberegistry-ca.crt}"
-EOF
-  chmod 600 /etc/rancher/rke2/registries.yaml
+  #cat > /etc/rancher/rke2/registries.yaml <<EOF
+#mirrors:
+#  "docker.io":
+#    endpoint:
+#      - "https://$REG_HOST"
+#configs:
+#  "$REG_HOST":
+#    auth:
+#      username: "$REG_USER"
+#      password: "$REG_PASS"
+#    tls:
+#      ca_file: "/usr/local/share/ca-certificates/${CA_BN:-kuberegistry-ca.crt}"
+#EOF
+#  chmod 600 /etc/rancher/rke2/registries.yaml
+
+  # Do NOT set system-default-registry here. We want the server to bootstrap
+  # from the cached upstream image names shipped in the tarball.
+  # If a private/offline registry is provided, write a full mirrors file so pulls
+  # (only when truly needed) will go to the offline endpoints.
+  mkdir -p /etc/rancher/rke2
+  : > /etc/rancher/rke2/config.yaml
+  if [[ -n "$REG_HOST" ]]; then
+    # Use the comprehensive mirrors writer so non-docker.io registries are covered too.
+    write_registries_yaml_with_fallbacks "$REG_HOST" "" "" "$REG_USER" "$REG_PASS" "/usr/local/share/ca-certificates/${CA_BN:-kuberegistry-ca.crt}"
+  else
+    # No registry configured → ensure no registries.yaml exists to avoid accidental pulls.
+    rm -f /etc/rancher/rke2/registries.yaml
+  fi
 
   cat > /etc/sysctl.d/99-disable-ipv6.conf <<'EOF'
 net.ipv6.conf.all.disable_ipv6 = 1
@@ -1505,6 +1474,15 @@ action_server() {
   ensure_containerd_ready
   # Ensure local images and registries fallback chain are in place
   #setup_image_resolution_strategy
+  # Ensure local images win first; if a registry is configured, also retag and write mirrors
+  if [[ -f "$CONFIG_FILE" ]] && [[ -n "$(yaml_spec_get "$CONFIG_FILE" registry || true)" ]]; then
+    setup_image_resolution_strategy
+  else
+    # No registry configured: make sure system-default-registry is not set, and no registries.yaml
+    sed -i '/^system-default-registry:/d' /etc/rancher/rke2/config.yaml 2>/dev/null || true
+    rm -f /etc/rancher/rke2/registries.yaml 2>/dev/null || true
+  fi
+
   log INFO "Seeding custom cluster CA (if provided)..."
   setup_custom_cluster_ca || true
   log INFO "Proceeding with offline RKE2 server install..."
