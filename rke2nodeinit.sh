@@ -198,7 +198,7 @@ fi
 
 # ---------- Defaults & tunables ----------------------------------------------------------------
 RKE2_VERSION=""                                       # auto-detect if empty
-REGISTRY="kuberegistry.dev.kube/rke2"
+REGISTRY="rke2registry.dev.local/rke2"
 REG_USER="admin"
 REG_PASS="ZAQwsx!@#123"
 CONFIG_FILE=""
@@ -905,7 +905,7 @@ setup_image_resolution_strategy() {
   fi
 
   # Fallbacks if still empty
-  primary_registry="${primary_registry:-${REGISTRY:-'kuberegistry.dev.kube/rke2'}}"
+  primary_registry="${primary_registry:-${REGISTRY:-'rke2registry.dev.local/rke2'}}"
   primary_host="${primary_registry%%/*}"
   [[ -n "$fallback_registry" ]]        && fallback_host="${fallback_registry%%/*}"        || fallback_host=""
   [[ -n "$default_offline_registry" ]] && default_host="${default_offline_registry%%/*}"  || default_host=""
@@ -914,7 +914,7 @@ setup_image_resolution_strategy() {
   if [[ -f /etc/rancher/rke2/registries.yaml ]]; then
     ca_guess="$(awk -F': *' '/ca_file:/ {gsub(/"/,"",$2); print $2; exit}' /etc/rancher/rke2/registries.yaml 2>/dev/null || true)"
   fi
-  [[ -z "$ca_guess" && -f /usr/local/share/ca-certificates/kuberegistry-ca.crt ]] && ca_guess="/usr/local/share/ca-certificates/kuberegistry-ca.crt"
+  [[ -z "$ca_guess" && -f /usr/local/share/ca-certificates/rke2ca-cert.crt ]] && ca_guess="/usr/local/share/ca-certificates/rke2ca-cert.crt"
 
   # 1) Load staged images, 2) Retag locally with the primary host so containerd finds them without network
   load_staged_images
@@ -1329,8 +1329,8 @@ action_image() {
   local CA_SRC=""
   if [[ -n "${CUSTOM_CA_ROOT_CRT:-}" ]]; then
     CA_SRC="$CUSTOM_CA_ROOT_CRT"
-  elif [[ -f "$SCRIPT_DIR/certs/kuberegistry-ca.crt" ]]; then
-    CA_SRC="$SCRIPT_DIR/certs/kuberegistry-ca.crt"
+  elif [[ -f "$SCRIPT_DIR/certs/rke2ca-cert.crt" ]]; then
+    CA_SRC="$SCRIPT_DIR/certs/rke2ca-cert.crt"
   fi
   if [[ -n "$CA_SRC" ]]; then
     local CA_BN="$(basename "$CA_SRC")"
@@ -1382,7 +1382,7 @@ action_image() {
 #      username: "$REG_USER"
 #      password: "$REG_PASS"
 #    tls:
-#      ca_file: "/usr/local/share/ca-certificates/${CA_BN:-kuberegistry-ca.crt}"
+#      ca_file: "/usr/local/share/ca-certificates/${CA_BN:-rke2ca-cert.crt}"
 #EOF
 #  chmod 600 /etc/rancher/rke2/registries.yaml
 
@@ -1394,7 +1394,7 @@ action_image() {
   : > /etc/rancher/rke2/config.yaml
   if [[ -n "$REG_HOST" ]]; then
     # Use the comprehensive mirrors writer so non-docker.io registries are covered too.
-    write_registries_yaml_with_fallbacks "$REG_HOST" "" "" "$REG_USER" "$REG_PASS" "/usr/local/share/ca-certificates/${CA_BN:-kuberegistry-ca.crt}"
+    write_registries_yaml_with_fallbacks "$REG_HOST" "" "" "$REG_USER" "$REG_PASS" "/usr/local/share/ca-certificates/${CA_BN:-rke2ca-cert.crt}"
   else
     # No registry configured → ensure no registries.yaml exists to avoid accidental pulls.
     rm -f /etc/rancher/rke2/registries.yaml

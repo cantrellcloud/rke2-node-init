@@ -85,7 +85,7 @@
 ├─ logs/
 │  └─ rke2nodeinit_<UTC-timestamp>.log
 └─ certs/
-   └─ kuberegistry-ca.crt           # Your private registry CA (you provide)
+   └─ rke2ca-cert.crt           # Your private registry CA (you provide)
 ```
 
 **System paths used:**
@@ -93,7 +93,7 @@
 * Stage: `/opt/rke2/stage/` (installer & tarballs for offline install)
 * Image preload: `/var/lib/rancher/rke2/agent/images/`
 * RKE2 config: `/etc/rancher/rke2/config.yaml`, `/etc/rancher/rke2/registries.yaml`
-* CA trust: `/usr/local/share/ca-certificates/kuberegistry-ca.crt` (then `update-ca-certificates`)
+* CA trust: `/usr/local/share/ca-certificates/rke2ca-cert.crt` (then `update-ca-certificates`)
 * Netplan: `/etc/netplan/99-rke-static.yaml` (others are backed up and removed)
 * Site defaults (DNS/search): `/etc/rke2image.defaults`
 
@@ -138,7 +138,7 @@ apiVersion: rkeprep/v1
 kind: Pull
 spec:
   rke2Version: "v1.34.1+rke2r1"         # optional; latest auto-detected if omitted
-  registry: "kuberegistry.dev.kube/rke2"
+  registry: "rke2registry.dev.local/rke2"
   registryUsername: "admin"
   registryPassword: "********"
 ```
@@ -149,7 +149,7 @@ spec:
 apiVersion: rkeprep/v1
 kind: Push
 spec:
-  registry: "kuberegistry.dev.kube/rke2"
+  registry: "rke2registry.dev.local/rke2"
   registryUsername: "admin"
   registryPassword: "********"
 ```
@@ -160,7 +160,7 @@ spec:
 apiVersion: rkeprep/v1
 kind: Image
 spec:
-  registry: "kuberegistry.dev.kube/rke2"   # host is used for system-default-registry
+  registry: "rke2registry.dev.local/rke2"   # host is used for system-default-registry
   registryUsername: "admin"
   registryPassword: "********"
   defaultDns: [ "10.0.1.34", "10.231.1.34" ]       # optional
@@ -211,20 +211,20 @@ spec:
    * (Optional) Push images to your private registry:
 
      ```bash
-     sudo ./rke2nodeinit.sh push -r kuberegistry.dev.kube/rke2 -u admin -p '…'
+     sudo ./rke2nodeinit.sh push -r rke2registry.dev.local/rke2 -u admin -p '…'
      ```
    * Review generated manifests: `outputs/images-manifest.txt|json`, SBOMs in `outputs/sbom/`.
 
 2. **Move artifacts to the offline target**
 
-   * Copy `downloads/` and `certs/kuberegistry-ca.crt` to the target host (keep same structure).
+   * Copy `downloads/` and `certs/rke2ca-cert.crt` to the target host (keep same structure).
 
 3. **On the offline target**
 
    * Stage the image and prep OS (**auto-reboot**):
 
      ```bash
-     sudo ./rke2nodeinit.sh image -r kuberegistry.dev.kube/rke2 -u admin -p '…'
+     sudo ./rke2nodeinit.sh image -r rke2registry.dev.local/rke2 -u admin -p '…'
      ```
    * After reboot, configure as **server** or **agent**:
 
@@ -272,7 +272,7 @@ spec:
 
 * Installs OS prereqs, sets nftables iptables, loads kernel modules, sysctls, disables swap, and **disables IPv6**.
 * Ensures **containerd + nerdctl FULL** are present (installs if missing).
-* Installs your **private registry CA** (from `certs/kuberegistry-ca.crt`) into the system trust and updates CA store.
+* Installs your **private registry CA** (from `certs/rke2ca-cert.crt`) into the system trust and updates CA store.
 * Stages:
 
   * Images archive to `/var/lib/rancher/rke2/agent/images/`
@@ -361,7 +361,7 @@ systemctl status rke2-server --no-pager
 systemctl status rke2-agent  --no-pager
 
 # Registry trust & config
-ls -l /usr/local/share/ca-certificates/kuberegistry-ca.crt
+ls -l /usr/local/share/ca-certificates/rke2ca-cert.crt
 sudo update-ca-certificates -v | tail
 sudo cat /etc/rancher/rke2/registries.yaml
 
@@ -416,7 +416,7 @@ cat /etc/netplan/99-rke-static.yaml
    * Ensure the **CA file** exists and is installed:
 
      ```
-     sudo cp certs/kuberegistry-ca.crt /usr/local/share/ca-certificates/
+     sudo cp certs/rke2ca-cert.crt /usr/local/share/ca-certificates/
      sudo update-ca-certificates
      ```
    * Confirm `registries.yaml` points to that CA and contains valid credentials.
@@ -550,10 +550,10 @@ A: The script sets `INSTALL_RKE2_TYPE` and `INSTALL_RKE2_ARTIFACT_PATH` for `ins
 sudo ./rke2nodeinit.sh pull -v v1.34.1+rke2r1
 
 # Simulate and review pushes
-sudo ./rke2nodeinit.sh --dry-push push -r kuberegistry.dev.kube/rke2 -u admin -p '…'
+sudo ./rke2nodeinit.sh --dry-push push -r rke2registry.dev.local/rke2 -u admin -p '…'
 
 # Stage offline image (auto-reboot)
-sudo ./rke2nodeinit.sh image -r kuberegistry.dev.kube/rke2 -u admin -p '…'
+sudo ./rke2nodeinit.sh image -r rke2registry.dev.local/rke2 -u admin -p '…'
 
 # Configure a server node (offline)
 sudo ./rke2nodeinit.sh server

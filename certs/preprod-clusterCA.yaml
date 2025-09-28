@@ -1,9 +1,0 @@
-apiVersion: rkeprep/v1
-kind: ClusterCA
-spec:
-  # paths may be absolute or relative to the script directory
-  rootCrt: certs/dev-certa001-ca-dev-local.crt
-  rootKey: certs/dev-certa001-ca-dev-local-key.pem
-  #intermediateCrt: 
-  #intermediateKey: 
-  installToOSTrust: true

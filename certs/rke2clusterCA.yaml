@@ -1,0 +1,9 @@
+apiVersion: rkeprep/v1
+kind: ClusterCA
+spec:
+  # paths may be absolute or relative to the script directory
+  rootCrt: local-cert-directory/rke2ca-cert.crt
+  rootKey: local-cert-directory/rke2ca-cert-key.pem
+  #intermediateCrt: 
+  #intermediateKey: 
+  installToOSTrust: true

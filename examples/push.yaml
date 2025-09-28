@@ -3,6 +3,6 @@ kind: Push
 metadata:
   name: rke2-push
 spec:
-  registry: kuberegistry.dev.kube/rke2
+  registry: rke2registry.dev.local/rke2
   registryUsername: admin
   registryPassword: ZAQwsx!@#123

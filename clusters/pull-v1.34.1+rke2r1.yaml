@@ -4,6 +4,6 @@ metadata:
   name: rke2-pull
 spec:
   rke2Version: v1.34.1+rke2r1
-  registry: kuberegistry.dev.kube/rke2
+  registry: rke2registry.dev.local/rke2
   registryUsername: admin
   registryPassword: ZAQwsx!@#123

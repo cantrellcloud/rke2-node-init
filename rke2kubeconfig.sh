@@ -45,9 +45,9 @@
 #
 # Example:
 #   kubeconfigs/
-#     j64manager-kubeconfig
-#     j64domain-kubeconfig
-#   -> produces rke2-kubeconfig.yaml with two contexts: j64manager, j64domain
+#     dc1manager-kubeconfig
+#     dc1domain-kubeconfig
+#   -> produces rke2-kubeconfig.yaml with two contexts: dc1manager, dc1domain
 #
 set -euo pipefail
 
