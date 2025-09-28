@@ -355,6 +355,19 @@ ask_remove_docker_if_present() {
   fi
 }
 
+install_containerd_nerdctl_from_cache() {
+  local tgz="$1"
+  [[ -f "$tgz" ]] || { log ERROR "Cached nerdctl FULL bundle not found: $tgz"; return 2; }
+  ensure_installed tar
+  spinner_run "Extracting nerdctl FULL (cached)" tar -C /usr/local -xzf "$tgz"
+  spinner_run "Reloading systemd units" systemctl daemon-reload
+  mkdir -p /etc/containerd
+  containerd config default | tee /etc/containerd/config.toml >/dev/null
+  sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
+  spinner_run "Enabling and starting containerd" systemctl enable --now containerd
+  log INFO "nerdctl installed (cached): $(/usr/local/bin/nerdctl --version 2>/dev/null || echo unknown)"
+}
+
 install_containerd_nerdctl_full() {
   # Install containerd + runc + CNI + BuildKit + nerdctl from the official "full" tarball.
   ensure_installed curl
@@ -410,10 +423,17 @@ ensure_containerd_ready() {
   if systemctl is-active --quiet containerd && command -v nerdctl >/dev/null 2>&1; then
     log INFO "containerd + nerdctl are present and active."
   else
-    log WARN "containerd + nerdctl not ready; installing the official FULL bundle."
-    install_containerd_nerdctl_full
+    # Try offline cache first
+    local cached
+    cached="$(ls -1 "$DOWNLOADS_DIR"/nerdctl-full-*-linux-"$ARCH".tar.gz 2>/dev/null | sort | tail -n1 || true)"
+    if [[ -n "$cached" ]]; then
+      log INFO "Installing containerd+nerdctl from cached bundle: $(basename "$cached")"
+      install_containerd_nerdctl_from_cache "$cached"
+    else
+      log WARN "containerd + nerdctl not ready; installing the official FULL bundle (online)."
+      install_containerd_nerdctl_full
+    fi
   fi
-
   # Namespace used by Kubernetes
   if ! nerdctl --namespace k8s.io images >/dev/null 2>&1; then
     nerdctl --namespace k8s.io images >/dev/null 2>&1 || true
@@ -1412,6 +1432,8 @@ action_server() {
   local SRC="$STAGE_DIR"
 
   ensure_containerd_ready
+  # Ensure local images and registries fallback chain are in place
+  setup_image_resolution_strategy
   log INFO "Seeding custom cluster CA (if provided)..."
   setup_custom_cluster_ca || true
   log INFO "Proceeding with offline RKE2 server install..."
@@ -1492,6 +1514,8 @@ action_agent() {
   local SRC="$STAGE_DIR"
 
   ensure_containerd_ready
+  # Ensure local images and registries fallback chain are in place
+  setup_image_resolution_strategy
   log INFO "Proceeding with offline RKE2 agent install..."
   run_rke2_installer "$SRC" "agent"
 
