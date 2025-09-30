@@ -224,73 +224,6 @@ yaml_spec_get_nested() {
   ' "$file" | sed -E 's/^"?(.*)"?$/\1/; s/^'\''?(.*)'\''?$/\1/'
 }
 
-# Write an embedded CA helper script to downloads/ for later offline use.
-# This does NOT generate any CA during image(); it only stages the helper.
-write_embedded_ca_helper() {
-  local outdir="${PROJECT_ROOT:-/rke2-node-init}/downloads"
-  local outfile="${outdir}/generate-custom-ca-certs.sh"
-  mkdir -p "$outdir"
-  cat >"$outfile" <<"EOF_HELPER"
-#!/usr/bin/env bash
-# generate-custom-ca-certs.sh
-# Minimal, offline-friendly helper to generate a cluster CA (root and optional intermediate)
-# Usage examples:
-#   ./generate-custom-ca-certs.sh --out-dir ./outputs --cn "Kube Registry Root CA"
-#   ./generate-custom-ca-certs.sh --intermediate --cn "Cluster Intermediate CA" --root-cert root.crt --root-key root.key
-# This helper is intentionally simple and uses OpenSSL.
-set -euo pipefail
-
-die(){ echo "ERROR: $*" >&2; exit 1; }
-
-OUT_DIR="."
-CN="Kube Registry Root CA"
-DAYS=3650
-BITS=4096
-MODE="root"  # root|intermediate
-ROOT_CERT=""
-ROOT_KEY=""
-OPENSSL_BIN="${OPENSSL_BIN:-openssl}"
-
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --out-dir) OUT_DIR="$2"; shift 2;;
-    --cn) CN="$2"; shift 2;;
-    --days) DAYS="$2"; shift 2;;
-    --bits) BITS="$2"; shift 2;;
-    --intermediate) MODE="intermediate"; shift ;;
-    --root-cert) ROOT_CERT="$2"; shift 2;;
-    --root-key)  ROOT_KEY="$2";  shift 2;;
-    --openssl) OPENSSL_BIN="$2"; shift 2;;
-    *) die "Unknown arg: $1" ;;
-  esac
-done
-
-mkdir -p "$OUT_DIR"
-
-if [[ "$MODE" == "root" ]]; then
-  echo "[INFO] Generating ROOT CA in ${OUT_DIR}"
-  $OPENSSL_BIN genrsa -out "${OUT_DIR}/root.key" "$BITS"
-  $OPENSSL_BIN req -x509 -new -nodes -key "${OUT_DIR}/root.key" -sha256 -days "$DAYS" -subj "/CN=${CN}" -out "${OUT_DIR}/root.crt"
-  echo "[OK] Wrote: ${OUT_DIR}/root.crt and ${OUT_DIR}/root.key"
-else
-  [[ -f "$ROOT_CERT" && -f "$ROOT_KEY" ]] || die "Need --root-cert and --root-key for intermediate"
-  echo "[INFO] Generating INTERMEDIATE CA in ${OUT_DIR} (signed by provided ROOT)"
-  $OPENSSL_BIN genrsa -out "${OUT_DIR}/intermediate.key" "$BITS"
-  $OPENSSL_BIN req -new -key "${OUT_DIR}/intermediate.key" -subj "/CN=${CN}" -out "${OUT_DIR}/intermediate.csr"
-  cat > "${OUT_DIR}/intermediate.cnf" <<EOCNF
-basicConstraints=CA:TRUE,pathlen=0
-keyUsage=keyCertSign, cRLSign
-subjectKeyIdentifier=hash
-authorityKeyIdentifier=keyid,issuer
-EOCNF
-  $OPENSSL_BIN x509 -req -in "${OUT_DIR}/intermediate.csr" -CA "$ROOT_CERT" -CAkey "$ROOT_KEY" -CAcreateserial -out "${OUT_DIR}/intermediate.crt" -days "$DAYS" -sha256 -extfile "${OUT_DIR}/intermediate.cnf"
-  echo "[OK] Wrote: ${OUT_DIR}/intermediate.crt and ${OUT_DIR}/intermediate.key"
-fi
-EOF_HELPER
-  chmod 0755 "$outfile"
-  log INFO "[INFO] Staged CA helper at $outfile"
-}
-
 # Stage user-provided custom CA artifacts during image() without generating
 # Accepts standalone kind: custom_ca YAML or inline spec.customCA under kind: Image
 stage_custom_ca_in_image() {
@@ -815,7 +748,6 @@ install_nerdctl_minimal() {
   log INFO "nerdctl installed: $(/usr/local/bin/nerdctl --version 2>/dev/null || echo 'installed')"
 }
 
-
 ensure_containerd_ready() {
   ask_remove_docker_if_present
 
@@ -969,6 +901,17 @@ load_site_defaults() {
   fi
 }
 
+fetch_custom_ca_generator() { 
+  # Prefetch custom-CA helper for offline use
+  if command -v curl >/dev/null 2>&1; then
+    local GEN_URL="https://raw.githubusercontent.com/k3s-io/k3s/refs/heads/main/contrib/util/generate-custom-ca-certs.sh"
+    log INFO "Fetching custom-CA helper script for offline use."
+    curl -fsSL -o "$DOWNLOADS_DIR/generate-custom-ca-certs.sh" "$GEN_URL" >>"$LOG_FILE" 2>&1 || true
+    chmod +x "$DOWNLOADS_DIR/generate-custom-ca-certs.sh" >>"$LOG_FILE" 2>&1 || true
+    log INFO "Staged custom-CA helper script for offline use."
+  fi
+}
+
 # ---------- OS prereqs --------------------------------------------------------------------------
 install_rke2_prereqs() {
   log INFO "Installing RKE2 prereqs (iptables-nft, modules, sysctl, swapoff)"
@@ -978,35 +921,57 @@ install_rke2_prereqs() {
   log INFO "Upgrading APT packages"
   spinner_run "Upgrading APT packages" apt-get upgrade -y # >>"$LOG_FILE" 2>&1
   log INFO "Installing required packages"
-  spinner_run "Installing required packages" apt-get install -y \
+  spinner_run "Installing required and optional packages" apt-get install -y \
     curl ca-certificates iptables nftables ethtool socat conntrack iproute2 \
     ebtables openssl tar gzip zstd jq # >>"$LOG_FILE" 2>&1
   log INFO "Removing unnecessary packages"
   spinner_run "Removing unnecessary packages" apt-get autoremove -y # >>"$LOG_FILE" 2>&1
 
-  if update-alternatives --list iptables >/dev/null 2>&1; then
-    update-alternatives --set iptables  /usr/sbin/iptables-nft >>"$LOG_FILE" 2>&1 || true
-    update-alternatives --set ip6tables /usr/sbin/ip6tables-nft >>"$LOG_FILE" 2>&1 || true
-    update-alternatives --set arptables /usr/sbin/arptables-nft >>"$LOG_FILE" 2>&1 || true
-    update-alternatives --set ebtables  /usr/sbin/ebtables-nft  >>"$LOG_FILE" 2>&1 || true
-  fi
-
-  cat >/etc/modules-load.d/rke2.conf <<EOF
-br_netfilter
+  # ------------------ Kernel modules + sysctls ------------------
+  mkdir -p /etc/modules-load.d /etc/sysctl.d
+  cat >/etc/modules-load.d/rke2.conf <<'MODS'
 overlay
-EOF
-  modprobe br_netfilter || true
+br_netfilter
+MODS
   modprobe overlay || true
+  modprobe br_netfilter || true
 
-  cat >/etc/sysctl.d/90-rke2.conf <<EOF
+  cat >/etc/sysctl.d/90-rke2.conf <<'SYS'
 net.bridge.bridge-nf-call-iptables = 1
 net.bridge.bridge-nf-call-ip6tables = 1
-net.ipv4.ip_forward = 1
-EOF
-  sysctl --system >/dev/null 2>>"$LOG_FILE" || true
+net.ipv4.ip_forward                 = 1
+SYS
+  sysctl --system >>"$LOG_FILE" 2>&1 || true
 
-  sed -i.bak '/\sswap\s/s/^/#/g' /etc/fstab || true
-  swapoff -a || true
+  # ------------------ Swap off (now and persistent) ------------------
+  if swapon --show | grep -q .; then
+    log WARN "Swap is enabled; disabling now."
+    swapoff -a || true
+  fi
+  if grep -qs '^\S\+\s\+\S\+\s\+swap\s' /etc/fstab; then
+    log INFO "Commenting swap entries in /etc/fstab for Kubernetes compatibility."
+    sed -ri 's/^(\s*[^#\s]+\s+[^#\s]+\s+swap\s+.*)$/# \1/' /etc/fstab
+  fi
+
+  # ------------------ NetworkManager: ignore CNI if present ------------------
+  if systemctl list-unit-files | grep -q '^NetworkManager.service'; then
+    mkdir -p /etc/NetworkManager/conf.d
+    cat >/etc/NetworkManager/conf.d/rke2-cni-unmanaged.conf <<'NM'
+[keyfile]
+unmanaged-devices=interface-name:cni*,interface-name:flannel.*,interface-name:flannel.1
+NM
+    systemctl restart NetworkManager || true
+    log INFO "Configured NetworkManager to ignore cni*/flannel* interfaces."
+  fi
+
+  # ------------------ Open ports if UFW is active ------------------
+  if command -v ufw >/dev/null 2>&1 && ufw status | grep -q 'Status: active'; then
+    ufw allow 6443/tcp || true   # Kubernetes API
+    ufw allow 9345/tcp || true   # RKE2 supervisor
+    ufw allow 10250/tcp || true  # kubelet
+    ufw allow 8472/udp || true   # VXLAN for CNI (flannel)
+    log INFO "UFW rules added for 6443/tcp, 9345/tcp, 10250/tcp, 8472/udp."
+  fi
 }
 
 verify_prereqs() {
@@ -1030,10 +995,10 @@ verify_prereqs() {
     log ERROR "Swap is enabled"; fail=1
   fi
 
-  if command -v nerdctl &>/dev/null && systemctl is-active --quiet containerd; then
-    log INFO "Runtime OK: containerd + nerdctl"
+  if command -v nerdctl &>/dev/null; then
+    log INFO "Runtime OK: nerdctl"
   else
-    log ERROR "containerd + nerdctl not ready"; fail=1
+    log ERROR "nerdctl not ready"; fail=1
   fi
 
   [[ -f "$SCRIPT_DIR/downloads/$IMAGES_TAR"     ]] && log INFO "Found images archive"     || log WARN "Images archive missing ($SCRIPT_DIR/downloads)"
@@ -1054,6 +1019,76 @@ verify_prereqs() {
   verify_custom_cluster_ca || fail=1
 
   return $fail
+}
+
+cache_rke2_artifacts() {
+  mkdir -p "$DOWNLOADS_DIR"
+  pushd "$DOWNLOADS_DIR" >/dev/null
+
+  # Stage CA helper for offline use (no generation here)
+  #write_embedded_ca_helper
+  # Optionally stage user-provided custom CA artifacts from YAML or prompt
+  stage_custom_ca_in_image
+
+  # Pick version: from config/env or latest online
+  if [[ -n "$REQ_VER" ]]; then
+    RKE2_VERSION="$REQ_VER"
+    log INFO "Using RKE2 version from config/env: $RKE2_VERSION"
+  else
+    detect_latest_rke2_version   # populates RKE2_VERSION
+  fi
+
+  local BASE_URL="https://github.com/rancher/rke2/releases/download/${RKE2_VERSION}"
+  local IMAGES_TAR="rke2-images.linux-${ARCH}.tar.zst"
+  local RKE2_TARBALL="rke2.linux-${ARCH}.tar.gz"
+  local SHA256_FILE="sha256sum-${ARCH}.txt"
+
+  # Download artifacts (idempotent)
+  [[ -f "$IMAGES_TAR"  ]] || spinner_run "Downloading $IMAGES_TAR"  curl -Lf "$BASE_URL/$IMAGES_TAR"  -o "$IMAGES_TAR"
+  [[ -f "$RKE2_TARBALL" ]] || spinner_run "Downloading $RKE2_TARBALL" curl -Lf "$BASE_URL/$RKE2_TARBALL" -o "$RKE2_TARBALL"
+  [[ -f "$SHA256_FILE" ]] || spinner_run "Downloading $SHA256_FILE"  curl -Lf "$BASE_URL/$SHA256_FILE"  -o "$SHA256_FILE"
+  [[ -f install.sh ]]    || spinner_run "Downloading install.sh"    curl -sfL "https://get.rke2.io" -o install.sh
+  chmod +x install.sh || true
+
+  # Verify checksums when possible
+  if command -v sha256sum >/dev/null 2>&1; then
+    if grep -q "$IMAGES_TAR" "$SHA256_FILE" 2>/dev/null; then
+      grep "$IMAGES_TAR"  "$SHA256_FILE" | sha256sum -c - >>"$LOG_FILE" 2>&1 || true
+    fi
+    if grep -q "$RKE2_TARBALL" "$SHA256_FILE" 2>/dev/null; then
+      grep "$RKE2_TARBALL" "$SHA256_FILE" | sha256sum -c - >>"$LOG_FILE" 2>&1 || true
+    fi
+  fi
+
+  popd >/dev/null
+
+  # Stage images tar where the RKE2 installer will auto-detect it offline
+  mkdir -p /var/lib/rancher/rke2/agent/images/
+  if [[ -f "$DOWNLOADS_DIR/$IMAGES_TAR" ]]; then
+    cp -f "$DOWNLOADS_DIR/$IMAGES_TAR" /var/lib/rancher/rke2/agent/images/ || true
+    log INFO "Staged ${IMAGES_TAR} into /var/lib/rancher/rke2/agent/images/"
+  fi
+}
+
+prompt_reboot() {
+  echo
+  if (( AUTO_YES )); then
+    log WARN "Auto-confirm enabled (-y). Rebooting now..."
+    sleep 2
+    reboot
+  else
+    read -r -p "Reboot now to ensure kernel modules/sysctls persist? [y/N]: " _ans
+    case "${_ans,,}" in
+      y|yes)
+        log WARN "Rebooting..."
+        sleep 2
+        reboot
+        ;;
+      *)
+        log INFO "Reboot deferred. Remember to reboot before installing RKE2."
+        ;;
+    esac
+  fi
 }
 
 # ---------- SBOM / metadata (optional) ----------------------------------------------------------
@@ -1483,10 +1518,6 @@ EOF
 # ACTIONS
 # ================================================================================================
 
-# ==================
-# Action: CLUSTER-CA
-# =============
-# Action: PULL
 # =============
 # Action: PUSH
 action_push() {
@@ -1584,146 +1615,22 @@ action_image() {
     yn="$(yaml_spec_get "$CONFIG_FILE" nerdctlInstall || true)"; [[ -n "$yn" ]] && WANT_NERDCTL="$yn"
   fi
 
-  # ------------------ Minimal packages ------------------
-  log INFO "Installing RKE2 prereqs (iptables-nft, modules, sysctl, swapoff)"
-  export DEBIAN_FRONTEND=noninteractive
-  log INFO "Updating APT package cache"
-  spinner_run "Updating APT package cache" apt-get update -y # >>"$LOG_FILE" 2>&1
-  log INFO "Upgrading APT packages"
-  spinner_run "Upgrading APT packages" apt-get upgrade -y # >>"$LOG_FILE" 2>&1
-  log INFO "Installing required packages"
-  spinner_run "Installing required and optional packages" apt-get install -y \
-    curl ca-certificates iptables nftables ethtool socat conntrack iproute2 \
-    ebtables openssl tar gzip zstd jq # >>"$LOG_FILE" 2>&1
-  log INFO "Removing unnecessary packages"
-  spinner_run "Removing unnecessary packages" apt-get autoremove -y # >>"$LOG_FILE" 2>&1
+  install_rke2_prereqs
+  cache_rke2_artifacts
 
-  # ------------------ Kernel modules + sysctls ------------------
-  mkdir -p /etc/modules-load.d /etc/sysctl.d
-  cat >/etc/modules-load.d/rke2.conf <<'MODS'
-overlay
-br_netfilter
-MODS
-  modprobe overlay || true
-  modprobe br_netfilter || true
-
-  cat >/etc/sysctl.d/90-rke2.conf <<'SYS'
-net.bridge.bridge-nf-call-iptables = 1
-net.bridge.bridge-nf-call-ip6tables = 1
-net.ipv4.ip_forward                 = 1
-SYS
-  sysctl --system >>"$LOG_FILE" 2>&1 || true
-
-  # ------------------ Swap off (now and persistent) ------------------
-  if swapon --show | grep -q .; then
-    log WARN "Swap is enabled; disabling now."
-    swapoff -a || true
-  fi
-  if grep -qs '^\S\+\s\+\S\+\s\+swap\s' /etc/fstab; then
-    log INFO "Commenting swap entries in /etc/fstab for Kubernetes compatibility."
-    sed -ri 's/^(\s*[^#\s]+\s+[^#\s]+\s+swap\s+.*)$/# \1/' /etc/fstab
-  fi
-
-  # ------------------ NetworkManager: ignore CNI if present ------------------
-  if systemctl list-unit-files | grep -q '^NetworkManager.service'; then
-    mkdir -p /etc/NetworkManager/conf.d
-    cat >/etc/NetworkManager/conf.d/rke2-cni-unmanaged.conf <<'NM'
-[keyfile]
-unmanaged-devices=interface-name:cni*,interface-name:flannel.*,interface-name:flannel.1
-NM
-    systemctl restart NetworkManager || true
-    log INFO "Configured NetworkManager to ignore cni*/flannel* interfaces."
-  fi
-
-  # ------------------ Open ports if UFW is active ------------------
-  if command -v ufw >/dev/null 2>&1 && ufw status | grep -q 'Status: active'; then
-    ufw allow 6443/tcp || true   # Kubernetes API
-    ufw allow 9345/tcp || true   # RKE2 supervisor
-    ufw allow 10250/tcp || true  # kubelet
-    ufw allow 8472/udp || true   # VXLAN for CNI (flannel)
-    log INFO "UFW rules added for 6443/tcp, 9345/tcp, 10250/tcp, 8472/udp."
-  fi
-
-  # ------------------ Cache RKE2 artifacts ------------------
-  mkdir -p "$DOWNLOADS_DIR"
-  pushd "$DOWNLOADS_DIR" >/dev/null
-
-  # Pick version: from config/env or latest online
-  if [[ -n "$REQ_VER" ]]; then
-    RKE2_VERSION="$REQ_VER"
-    log INFO "Using RKE2 version from config/env: $RKE2_VERSION"
-  else
-    detect_latest_rke2_version   # populates RKE2_VERSION
-  fi
-
-  local BASE_URL="https://github.com/rancher/rke2/releases/download/${RKE2_VERSION}"
-  local IMAGES_TAR="rke2-images.linux-${ARCH}.tar.zst"
-  local RKE2_TARBALL="rke2.linux-${ARCH}.tar.gz"
-  local SHA256_FILE="sha256sum-${ARCH}.txt"
-
-  # Download artifacts (idempotent)
-  [[ -f "$IMAGES_TAR"  ]] || spinner_run "Downloading $IMAGES_TAR"  curl -Lf "$BASE_URL/$IMAGES_TAR"  -o "$IMAGES_TAR"
-  [[ -f "$RKE2_TARBALL" ]] || spinner_run "Downloading $RKE2_TARBALL" curl -Lf "$BASE_URL/$RKE2_TARBALL" -o "$RKE2_TARBALL"
-  [[ -f "$SHA256_FILE" ]] || spinner_run "Downloading $SHA256_FILE"  curl -Lf "$BASE_URL/$SHA256_FILE"  -o "$SHA256_FILE"
-  [[ -f install.sh ]]    || spinner_run "Downloading install.sh"    curl -sfL "https://get.rke2.io" -o install.sh
-  chmod +x install.sh || true
-
-  # Verify checksums when possible
-  if command -v sha256sum >/dev/null 2>&1; then
-    if grep -q "$IMAGES_TAR" "$SHA256_FILE" 2>/dev/null; then
-      grep "$IMAGES_TAR"  "$SHA256_FILE" | sha256sum -c - >>"$LOG_FILE" 2>&1 || true
-    fi
-    if grep -q "$RKE2_TARBALL" "$SHA256_FILE" 2>/dev/null; then
-      grep "$RKE2_TARBALL" "$SHA256_FILE" | sha256sum -c - >>"$LOG_FILE" 2>&1 || true
-    fi
-  fi
-
-  popd >/dev/null
-
-  # Stage images tar where the RKE2 installer will auto-detect it offline
-  mkdir -p /var/lib/rancher/rke2/agent/images/
-  if [[ -f "$DOWNLOADS_DIR/$IMAGES_TAR" ]]; then
-    cp -f "$DOWNLOADS_DIR/$IMAGES_TAR" /var/lib/rancher/rke2/agent/images/ || true
-    log INFO "Staged ${IMAGES_TAR} into /var/lib/rancher/rke2/agent/images/"
-  fi
-
-  # ------------------ nerdctl CLI only ------------------
+  # install nerdctl
   if [[ "${WANT_NERDCTL,,}" =~ ^(1|true|yes)$ ]]; then
     install_nerdctl_minimal || true
   else
     log INFO "Skipping nerdctl installation (per configuration)."
   fi
 
-
+ # Image prep complete
   echo "[READY] Minimal image prep complete. Cached artifacts in: $DOWNLOADS_DIR"
   echo "        - You can now install RKE2 offline using the cached tarballs."
   echo
-
-  if (( AUTO_YES )); then
-    log WARN "Auto-confirm enabled (-y). Rebooting now..."
-    sleep 2
-    reboot
-  else
-    read -r -p "Reboot now to ensure kernel modules/sysctls persist? [y/N]: " _ans
-    case "${_ans,,}" in
-      y|yes)
-        log WARN "Rebooting..."
-        sleep 2
-        reboot
-        ;;
-      *)
-        log INFO "Reboot deferred. Remember to reboot before installing RKE2."
-        ;;
-    esac
-  fi
-  # Stage CA helper for offline use (no generation here)
-  write_embedded_ca_helper
-  # Optionally stage user-provided custom CA artifacts from YAML or prompt
-  stage_custom_ca_in_image
-  # ------------------ Prompt for reboot ------------------
-  echo
+  prompt_reboot
 }
-
 
 # ==============
 # Action: SERVER
