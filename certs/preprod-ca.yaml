@@ -1,5 +1,7 @@
 apiVersion: rkeprep/v1
 kind: ClusterCA
+metadata:
+  name: preprod-ca
 spec:
   # paths may be absolute or relative to the script directory
   rootCrt: certs/dev-certa001-ca-dev-local.crt

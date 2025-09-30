@@ -1,9 +1,0 @@
-apiVersion: rkeprep/v1
-kind: Pull
-metadata:
-  name: rke2-pull
-spec:
-  rke2Version: v1.33.1+rke2r1
-  registry: rke2registry.dev.local/rke2
-  registryUsername: admin
-  registryPassword: ZAQwsx!@#123

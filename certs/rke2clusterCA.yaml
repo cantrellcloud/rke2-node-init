@@ -1,5 +1,7 @@
 apiVersion: rkeprep/v1
 kind: ClusterCA
+metadata:
+  name: rke2cluster-ca
 spec:
   # paths may be absolute or relative to the script directory
   rootCrt: local-cert-directory/rke2ca-cert.crt
