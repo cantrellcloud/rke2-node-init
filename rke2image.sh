@@ -441,7 +441,7 @@ action_image() {
   prompt_reboot
 }
 
-############
-##  R U N ##
+#############
+##  R U N  ##
 
 action_image
