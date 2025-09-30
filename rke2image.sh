@@ -1,14 +1,33 @@
 #!/usr/bin/env bash
 #
-# If not running under bash, re-exec with bash
+# --- Re-exec with bash ---
 if [ -z "${BASH_VERSION:-}" ]; then
   exec /usr/bin/env bash "$0" "$@"
 fi
 
-# Fail fast on CRLF (Windows) endings, which can also trigger odd parse errors
+# --- CRLF check ---
 case "$(head -c 2 "$0" | od -An -t x1 | tr -d ' ')" in
   *0d0a) echo "ERROR: Windows line endings detected. Run: dos2unix '$0'"; exit 2;;
 esac
+
+# --- Environment ---
+set -Eeuo pipefail
+trap 'rc=$?; echo "[ERROR] Unexpected failure (exit $rc) at line $LINENO"; exit $rc' ERR
+umask 022
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+# --- Paths ---
+SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd -P)"
+LOG_DIR="$SCRIPT_DIR/logs"
+OUT_DIR="$SCRIPT_DIR/outputs"
+DOWNLOADS_DIR="$SCRIPT_DIR/downloads"
+STAGE_DIR="/opt/rke2/stage"
+SBOM_DIR="$OUT_DIR/sbom"
+
+mkdir -p "$LOG_DIR" "$OUT_DIR" "$DOWNLOADS_DIR" "$STAGE_DIR" "$SBOM_DIR"
+
+# --- Logging ---
+LOG_FILE="$LOG_DIR/rke2image_$(date -u +"%Y-%m-%dT%H-%M-%SZ").log"
 
 #########################
 ##  F U N C T I O N S  ##
@@ -32,7 +51,7 @@ log() {
   ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
   host="$(hostname)"
   echo "[$level] $msg"
-  printf "%s %s rke2nodeinit[%d]: %s %s\n" "$ts" "$host" "$$" "$level:" "$msg" >> "$LOG_FILE"
+  printf "%s %s rke2image[%d]: %s %s\n" "$ts" "$host" "$$" "$level:" "$msg" >> "$LOG_FILE"
 }
 
 load_site_defaults() {
