@@ -440,13 +440,13 @@ install_rke2_prereqs() {
   log INFO "Installing RKE2 prereqs (iptables-nft, modules, sysctl, swapoff)"
   export DEBIAN_FRONTEND=noninteractive
   log INFO "Updating APT package cache"
-  spinner_run "Updating APT package cache" apt-get update -y # >>"$LOG_FILE" 2>&1
+  spinner_run "Updating APT package cache" apt-get update -y
   log INFO "Upgrading APT packages"
-  spinner_run "Upgrading APT packages" apt-get upgrade -y # >>"$LOG_FILE" 2>&1
+  spinner_run "Upgrading APT packages" apt-get upgrade -y
   log INFO "Installing required packages"
   spinner_run "Installing required packages" apt-get install -y \
     curl ca-certificates iptables nftables ethtool socat conntrack iproute2 \
-    ebtables openssl tar gzip zstd jq # >>"$LOG_FILE" 2>&1
+    ebtables openssl tar gzip zstd jq
   log INFO "Removing unnecessary packages"
   spinner_run "Removing unnecessary packages" apt-get autoremove -y # >>"$LOG_FILE" 2>&1
 
@@ -457,6 +457,7 @@ install_rke2_prereqs() {
     update-alternatives --set ebtables  /usr/sbin/ebtables-nft  >>"$LOG_FILE" 2>&1 || true
   fi
 
+  mkdir -p /etc/modules-load.d /etc/sysctl.d
   cat >/etc/modules-load.d/rke2.conf <<EOF
 br_netfilter
 overlay
@@ -471,8 +472,35 @@ net.ipv4.ip_forward = 1
 EOF
   sysctl --system >/dev/null 2>>"$LOG_FILE" || true
 
-  sed -i.bak '/\sswap\s/s/^/#/g' /etc/fstab || true
-  swapoff -a || true
+  # ------------------ Swap off (now and persistent) ------------------
+  if swapon --show | grep -q .; then
+    log WARN "Swap is enabled; disabling now."
+    swapoff -a || true
+  fi
+  if grep -qs '^\S\+\s\+\S\+\s\+swap\s' /etc/fstab; then
+    log INFO "Commenting swap entries in /etc/fstab for Kubernetes compatibility."
+    sed -ri 's/^(\s*[^#\s]+\s+[^#\s]+\s+swap\s+.*)$/# \1/' /etc/fstab
+  fi
+
+  # ------------------ NetworkManager: ignore CNI if present ------------------
+  if systemctl list-unit-files | grep -q '^NetworkManager.service'; then
+    mkdir -p /etc/NetworkManager/conf.d
+    cat >/etc/NetworkManager/conf.d/rke2-cni-unmanaged.conf <<'NM'
+[keyfile]
+unmanaged-devices=interface-name:cni*,interface-name:flannel.*,interface-name:flannel.1
+NM
+    systemctl restart NetworkManager || true
+    log INFO "Configured NetworkManager to ignore cni*/flannel* interfaces."
+  fi
+
+  # ------------------ Open ports if UFW is active ------------------
+  if command -v ufw >/dev/null 2>&1 && ufw status | grep -q 'Status: active'; then
+    ufw allow 6443/tcp || true   # Kubernetes API
+    ufw allow 9345/tcp || true   # RKE2 supervisor
+    ufw allow 10250/tcp || true  # kubelet
+    ufw allow 8472/udp || true   # VXLAN for CNI (flannel)
+    log INFO "UFW rules added for 6443/tcp, 9345/tcp, 10250/tcp, 8472/udp."
+  fi
 }
 
 verify_prereqs() {
@@ -940,6 +968,98 @@ EOF
   log INFO "Wrote /etc/rancher/rke2/registries.yaml with endpoints (priority): ${primary}${fallback:+, ${fallback}}${default_offline:+, ${default_offline}}"
 }
 
+fetch_rke2_ca_generator() { 
+  # Prefetch custom-CA helper for offline use
+  if command -v curl >/dev/null 2>&1; then
+    local GEN_URL="https://raw.githubusercontent.com/k3s-io/k3s/refs/heads/main/contrib/util/generate-custom-ca-certs.sh"
+    log INFO "Fetching custom-CA helper script for offline use."
+    curl -fsSL -o "$DOWNLOADS_DIR/generate-custom-ca-certs.sh" "$GEN_URL" >>"$LOG_FILE" 2>&1 || true
+    chmod +x "$DOWNLOADS_DIR/generate-custom-ca-certs.sh" >>"$LOG_FILE" 2>&1 || true
+    log INFO "Staged custom-CA helper script for offline use."
+  fi
+}
+
+cache_rke2_artifacts() {
+  mkdir -p "$DOWNLOADS_DIR"
+  pushd "$DOWNLOADS_DIR" >/dev/null
+
+  # Pick version: from config/env or latest online
+  if [[ -n "$REQ_VER" ]]; then
+    RKE2_VERSION="$REQ_VER"
+    log INFO "Using RKE2 version from config/env: $RKE2_VERSION"
+  else
+    detect_latest_rke2_version   # populates RKE2_VERSION
+  fi
+
+  local BASE_URL="https://github.com/rancher/rke2/releases/download/${RKE2_VERSION}"
+  local IMAGES_TAR="rke2-images.linux-${ARCH}.tar.zst"
+  local RKE2_TARBALL="rke2.linux-${ARCH}.tar.gz"
+  local SHA256_FILE="sha256sum-${ARCH}.txt"
+
+  # Download artifacts (idempotent)
+  [[ -f "$IMAGES_TAR"  ]] || spinner_run "Downloading $IMAGES_TAR"  curl -Lf "$BASE_URL/$IMAGES_TAR"  -o "$IMAGES_TAR"
+  [[ -f "$RKE2_TARBALL" ]] || spinner_run "Downloading $RKE2_TARBALL" curl -Lf "$BASE_URL/$RKE2_TARBALL" -o "$RKE2_TARBALL"
+  [[ -f "$SHA256_FILE" ]] || spinner_run "Downloading $SHA256_FILE"  curl -Lf "$BASE_URL/$SHA256_FILE"  -o "$SHA256_FILE"
+  [[ -f install.sh ]]    || spinner_run "Downloading install.sh"    curl -sfL "https://get.rke2.io" -o install.sh
+  chmod +x install.sh || true
+
+  # Verify checksums when possible
+  if command -v sha256sum >/dev/null 2>&1; then
+    if grep -q "$IMAGES_TAR" "$SHA256_FILE" 2>/dev/null; then
+      grep "$IMAGES_TAR"  "$SHA256_FILE" | sha256sum -c - >>"$LOG_FILE" 2>&1 || true
+    fi
+    if grep -q "$RKE2_TARBALL" "$SHA256_FILE" 2>/dev/null; then
+      grep "$RKE2_TARBALL" "$SHA256_FILE" | sha256sum -c - >>"$LOG_FILE" 2>&1 || true
+    fi
+  fi
+
+  popd >/dev/null
+
+  # --- Stage artifacts for offline install -----------------------------------
+  mkdir -p /var/lib/rancher/rke2/agent/images/
+  if [[ -f "$DOWNLOADS_DIR/$IMAGES_TAR" ]]; then
+    cp -f "$DOWNLOADS_DIR/$IMAGES_TAR" /var/lib/rancher/rke2/agent/images/ || true
+    log INFO "Staged ${IMAGES_TAR} into /var/lib/rancher/rke2/agent/images/"
+  fi
+
+  mkdir -p "$STAGE_DIR"
+  for f in "$RKE2_TARBALL" "$SHA256_FILE" "install.sh"; do
+    if [[ -f "$DOWNLOADS_DIR/$f" ]]; then
+      cp -f "$DOWNLOADS_DIR/$f" "$STAGE_DIR/"
+      [[ "$f" == "install.sh" ]] && chmod +x "$STAGE_DIR/install.sh"
+      log INFO "Staged $f into $STAGE_DIR"
+    fi
+  done
+
+  # Stage custom-CA helper if present in downloads
+  if [[ -f "$DOWNLOADS_DIR/generate-custom-ca-certs.sh" ]]; then
+    cp -f "$DOWNLOADS_DIR/generate-custom-ca-certs.sh" "$STAGE_DIR/generate-custom-ca-certs.sh" || true
+    chmod +x "$STAGE_DIR/generate-custom-ca-certs.sh" || true
+    log INFO "Staged custom-CA helper into $STAGE_DIR."
+  fi
+}
+
+prompt_reboot() {
+  echo
+  if (( AUTO_YES )); then
+    log WARN "Auto-confirm enabled (-y). Rebooting now..."
+    sleep 2
+    reboot
+  else
+    read -r -p "Reboot now to ensure kernel modules/sysctls persist? [y/N]: " _ans
+    case "${_ans,,}" in
+      y|yes)
+        log WARN "Rebooting..."
+        sleep 2
+        reboot
+        ;;
+      *)
+        log INFO "Reboot deferred. Remember to reboot before installing RKE2."
+        ;;
+    esac
+  fi
+}
+
 # ================================================================================================
 # ACTIONS
 # ================================================================================================
@@ -1114,49 +1234,8 @@ action_image() {
     log WARN "Could not detect nerdctl latest release via GitHub API."
   fi
 
-  # --- Download RKE2 artifacts (images, tarball, checksums, installer) -------
-  if [[ -n "$REQ_VER" ]]; then
-    RKE2_VERSION="$REQ_VER"
-    log INFO "Using requested RKE2 version: $RKE2_VERSION"
-  else
-    detect_latest_rke2_version
-  fi
-
-  ensure_installed zstd
-  local BASE_URL="https://github.com/rancher/rke2/releases/download/${RKE2_VERSION//+/%2B}"
-  mkdir -p "$DOWNLOADS_DIR"
-  pushd "$DOWNLOADS_DIR" >/dev/null
-  spinner_run "Downloading $IMAGES_TAR"   curl -Lf "$BASE_URL/$IMAGES_TAR"   -o "$IMAGES_TAR"
-  spinner_run "Downloading $RKE2_TARBALL" curl -Lf "$BASE_URL/$RKE2_TARBALL" -o "$RKE2_TARBALL"
-  spinner_run "Downloading $SHA256_FILE"  curl -Lf "$BASE_URL/$SHA256_FILE"  -o "$SHA256_FILE"
-  spinner_run "Downloading install.sh"    curl -sfL "https://get.rke2.io"    -o install.sh
-  chmod +x install.sh
-  log INFO "Verifying checksums..."
-  grep "$IMAGES_TAR"   "$SHA256_FILE" | sha256sum -c - >>"$LOG_FILE" 2>&1 || true
-  grep "$RKE2_TARBALL" "$SHA256_FILE" | sha256sum -c - >>"$LOG_FILE" 2>&1 || true
-  popd >/dev/null
-
-  # --- Stage artifacts for offline install -----------------------------------
-  mkdir -p /var/lib/rancher/rke2/agent/images/
-  if [[ -f "$DOWNLOADS_DIR/$IMAGES_TAR" ]]; then
-    cp -f "$DOWNLOADS_DIR/$IMAGES_TAR" /var/lib/rancher/rke2/agent/images/ || true
-    log INFO "Staged ${IMAGES_TAR} into /var/lib/rancher/rke2/agent/images/"
-  fi
-  mkdir -p "$STAGE_DIR"
-  for f in "$RKE2_TARBALL" "$SHA256_FILE" "install.sh"; do
-    if [[ -f "$DOWNLOADS_DIR/$f" ]]; then
-      cp -f "$DOWNLOADS_DIR/$f" "$STAGE_DIR/"
-      [[ "$f" == "install.sh" ]] && chmod +x "$STAGE_DIR/install.sh"
-      log INFO "Staged $f into $STAGE_DIR"
-    fi
-  done
-
-  # Stage custom-CA helper if present in downloads
-  if [[ -f "$DOWNLOADS_DIR/generate-custom-ca-certs.sh" ]]; then
-    cp -f "$DOWNLOADS_DIR/generate-custom-ca-certs.sh" "$STAGE_DIR/generate-custom-ca-certs.sh" || true
-    chmod +x "$STAGE_DIR/generate-custom-ca-certs.sh" || true
-    log INFO "Staged custom-CA helper into $STAGE_DIR."
-  fi
+  fetch_rke2_ca_generator
+  cache_rke2_artifacts
 
   # --- Optional: CA trust + registries mirrors -------------------------------
   local CA_BN=""
@@ -1246,20 +1325,11 @@ action_image() {
     log INFO "Wrote $RUN_OUT_DIR/README.txt"
   fi
 
-  # --- Finalize and reboot or poweroff (airgap wrapper sets NO_REBOOT=1) -----
-  if [[ -z "${NO_REBOOT:-}" ]]; then
-    log INFO "Applying OS updates; the system will reboot automatically..."
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update -y >>"$LOG_FILE" 2>&1
-    apt-get -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" dist-upgrade -y >>"$LOG_FILE" 2>&1
-    apt-get autoremove -y >>"$LOG_FILE" 2>&1 || true
-    apt-get autoclean  -y >>"$LOG_FILE" 2>&1 || true
-    log WARN "Rebooting now to complete updates. Power off after reboot, then clone the VM for the air‑gapped environment."
-    sleep 6
-    reboot
-  else
-    log WARN "NO_REBOOT=1 set; skipping reboot so the wrapper can power off for templating."
-  fi
+ # Image prep complete
+  echo "[READY] Minimal image prep complete. Cached artifacts in: $DOWNLOADS_DIR"
+  echo "        - You can now install RKE2 offline using the cached tarballs."
+  echo
+  prompt_reboot
 }
 
 
