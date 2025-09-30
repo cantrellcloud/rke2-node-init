@@ -723,7 +723,7 @@ install_containerd_nerdctl_full() {
   if [[ -d /opt/cni/bin ]]; then log INFO "CNI plugins present: $(/bin/ls -1 /opt/cni/bin | wc -l) files"; fi
 }
 
-install_nerdctl_minimal() {
+install_nerdctl() {
   # Install ONLY the nerdctl CLI (no containerd). It will be useful once RKE2's containerd is running.
   ensure_installed curl
   ensure_installed ca-certificates
@@ -901,7 +901,7 @@ load_site_defaults() {
   fi
 }
 
-fetch_custom_ca_generator() { 
+fetch_rke2_ca_generator() { 
   # Prefetch custom-CA helper for offline use
   if command -v curl >/dev/null 2>&1; then
     local GEN_URL="https://raw.githubusercontent.com/k3s-io/k3s/refs/heads/main/contrib/util/generate-custom-ca-certs.sh"
@@ -1024,11 +1024,6 @@ verify_prereqs() {
 cache_rke2_artifacts() {
   mkdir -p "$DOWNLOADS_DIR"
   pushd "$DOWNLOADS_DIR" >/dev/null
-
-  # Stage CA helper for offline use (no generation here)
-  #write_embedded_ca_helper
-  # Optionally stage user-provided custom CA artifacts from YAML or prompt
-  stage_custom_ca_in_image
 
   # Pick version: from config/env or latest online
   if [[ -n "$REQ_VER" ]]; then
@@ -1616,11 +1611,12 @@ action_image() {
   fi
 
   install_rke2_prereqs
+  fetch_rke2_ca_generator
   cache_rke2_artifacts
 
   # install nerdctl
   if [[ "${WANT_NERDCTL,,}" =~ ^(1|true|yes)$ ]]; then
-    install_nerdctl_minimal || true
+    install_nerdctl || true
   else
     log INFO "Skipping nerdctl installation (per configuration)."
   fi
