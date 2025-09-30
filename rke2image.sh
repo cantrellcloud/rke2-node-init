@@ -13,6 +13,28 @@ esac
 #########################
 ##  F U N C T I O N S  ##
 
+detect_latest_rke2_version() {
+  if [[ -z "${RKE2_VERSION:-}" ]]; then
+    log INFO "Detecting latest RKE2 version from GitHub..."
+    ensure_installed curl
+    local j
+    j="$(curl -fsSL https://api.github.com/repos/rancher/rke2/releases/latest || true)"
+    RKE2_VERSION="$(echo "$j" | grep -Po '"tag_name":\s*"\K[^"]+' || true)"
+    [[ -z "$RKE2_VERSION" ]] && { log ERROR "Failed to detect latest RKE2 version"; exit 2; }
+    log INFO "Using RKE2 version: $RKE2_VERSION"
+  fi
+}
+
+log() {
+  local level="$1"; shift
+  local msg="$*"
+  local ts host
+  ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  host="$(hostname)"
+  echo "[$level] $msg"
+  printf "%s %s rke2nodeinit[%d]: %s %s\n" "$ts" "$host" "$$" "$level:" "$msg" >> "$LOG_FILE"
+}
+
 load_site_defaults() {
   local STATE="/etc/rke2image.defaults"
   if [[ -f "$STATE" ]]; then
@@ -23,24 +45,6 @@ load_site_defaults() {
   else
     DEFAULT_SEARCH=""
   fi
-}
-
-yaml_spec_get() {
-  local file="$1" key="$2"
-  awk -v k="$key" '
-    BEGIN { inSpec=0 }
-    /^[[:space:]]*spec:[[:space:]]*$/ { inSpec=1; next }
-    inSpec==1 {
-      if ($0 ~ /^[^[:space:]]/) { exit }
-      if ($0 ~ "^[[:space:]]+" k "[[:space:]]*:") {
-        sub(/^[[:space:]]+/, "", $0)
-        sub(k "[[:space:]]*:[[:space:]]*", "", $0)
-        gsub(/^[[:space:]]+|[[:space:]]+$/, "", $0)
-        print $0
-        exit
-      }
-    }
-  ' "$file"
 }
 
 prompt_reboot() {
@@ -62,6 +66,62 @@ prompt_reboot() {
         ;;
     esac
   fi
+}
+
+# Simple spinner for long-running steps (visible progress indicator)
+spinner_run() {
+  local label="$1"; shift
+  local cmd=( "$@" )
+  log INFO "$label..."
+
+  ( "${cmd[@]}" >>"$LOG_FILE" 2>&1 ) &
+  local pid=$!
+
+  # Forward signals to the child so Ctrl-C works cleanly
+  trap 'kill -TERM "$pid" 2>/dev/null' TERM INT
+
+  local spin='|/-\' i=0
+  while kill -0 "$pid" 2>/dev/null; do
+    printf "\r[WORK] %s %s" "${spin:i++%${#spin}:1}" "$label"
+    sleep 0.15
+  done
+
+  # <-- this is the critical change: protect wait from set -e
+  local rc
+  if wait "$pid"; then
+    rc=0
+  else
+    rc=$?
+  fi
+
+  trap - TERM INT
+  printf "\r"
+  if (( rc == 0 )); then
+    echo "[DONE] $label"
+    log INFO "$label...done"
+  else
+    echo "[FAIL] $label (rc=$rc)"
+    log ERROR "$label failed (rc=$rc). See $LOG_FILE"
+    exit "$rc"
+  fi
+}
+
+yaml_spec_get() {
+  local file="$1" key="$2"
+  awk -v k="$key" '
+    BEGIN { inSpec=0 }
+    /^[[:space:]]*spec:[[:space:]]*$/ { inSpec=1; next }
+    inSpec==1 {
+      if ($0 ~ /^[^[:space:]]/) { exit }
+      if ($0 ~ "^[[:space:]]+" k "[[:space:]]*:") {
+        sub(/^[[:space:]]+/, "", $0)
+        sub(k "[[:space:]]*:[[:space:]]*", "", $0)
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", $0)
+        print $0
+        exit
+      }
+    }
+  ' "$file"
 }
 
 # Stage user-provided custom CA artifacts during image() without generating
@@ -256,6 +316,16 @@ cache_rke2_artifacts() {
   fi
 }
 
+ensure_installed() {
+  local pkg="$1"
+  dpkg -s "$pkg" &>/dev/null || {
+    log INFO "Installing package: $pkg"
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -y >>"$LOG_FILE" 2>&1
+    apt-get install -y "$pkg" >>"$LOG_FILE" 2>&1
+  }
+}
+
 install_nerdctl() {
   # Install ONLY the nerdctl CLI (no containerd). It will be useful once RKE2's containerd is running.
   ensure_installed curl
@@ -327,3 +397,7 @@ action_image() {
   prompt_reboot
 }
 
+############
+##  R U N ##
+
+action_image
