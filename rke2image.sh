@@ -29,6 +29,31 @@ mkdir -p "$LOG_DIR" "$OUT_DIR" "$DOWNLOADS_DIR" "$STAGE_DIR" "$SBOM_DIR"
 # --- Logging ---
 LOG_FILE="$LOG_DIR/rke2image_$(date -u +"%Y-%m-%dT%H-%M-%SZ").log"
 
+# --- Defaults ---
+RKE2_VERSION=""    # auto-detect if empty
+REGISTRY="rke2registry.dev.local/rke2"
+REG_USER="admin"
+REG_PASS="ZAQwsx!@#123"
+CONFIG_FILE=""
+ARCH="$(uname -m)"
+case "$ARCH" in
+  x86_64) ARCH="amd64";;
+  aarch64) ARCH="arm64";;
+  *) ARCH="amd64";;
+esac
+
+DEFAULT_DNS="10.0.1.34,10.231.1.34"
+AUTO_YES=0                  # -y auto-confirm reboots
+PRINT_CONFIG=0              # -P print sanitized YAML
+DRY_PUSH=0                  # --dry-push skips actual registry push
+
+# --- Default Artifacts ---
+IMAGES_TAR="rke2-images.linux-$ARCH.tar.zst"
+RKE2_TARBALL="rke2.linux-$ARCH.tar.gz"
+SHA256_FILE="sha256sum-$ARCH.txt"
+RKE2_CA_GEN="generate-custom-ca-certs.sh"
+
+
 #########################
 ##  F U N C T I O N S  ##
 
