@@ -1761,7 +1761,8 @@ action_agent() {
   # Ensure local images and registries fallback chain are in place
   #setup_image_resolution_strategy
   log INFO "Proceeding with offline RKE2 agent install..."
-  \1  if [[ -n "${RUN_OUT_DIR:-}" ]]; then
+  \1
+  if [[ -n "${RUN_OUT_DIR:-}" ]]; then
     [[ -f /etc/rancher/rke2/config.yaml ]] && cp -f /etc/rancher/rke2/config.yaml "$RUN_OUT_DIR/${SPEC_NAME}-rke2-config.yaml" && log INFO "Saved rke2 config to $RUN_OUT_DIR/${SPEC_NAME}-rke2-config.yaml"
     [[ -f /etc/rancher/rke2/registries.yaml ]] && cp -f /etc/rancher/rke2/registries.yaml "$RUN_OUT_DIR/${SPEC_NAME}-registries.yaml" && log INFO "Saved registries to $RUN_OUT_DIR/${SPEC_NAME}-registries.yaml"
     if [[ -n "${AGENT_CA_CERT:-}" && -f "${AGENT_CA_CERT}" ]]; then cp -f "${AGENT_CA_CERT}" "$RUN_OUT_DIR/${SPEC_NAME}-trusted-ca.crt"; fi
