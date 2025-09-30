@@ -1223,7 +1223,7 @@ action_pull() {
   fi
 
   detect_latest_rke2_version
-  ensure_containerd_ready
+  #ensure_containerd_ready
 
   local BASE_URL="https://github.com/rancher/rke2/releases/download/${RKE2_VERSION//+/%2B}"
   mkdir -p "$DOWNLOADS_DIR"
@@ -1258,7 +1258,7 @@ action_push() {
     log WARN "Using YAML values; CLI flags may be overridden (push)."
   fi
 
-  ensure_containerd_ready
+  #ensure_containerd_ready
   ensure_installed zstd
 
   local work="$DOWNLOADS_DIR"
@@ -1348,7 +1348,7 @@ action_image() {
   fi
 
   install_rke2_prereqs
-  ensure_containerd_ready
+  #ensure_containerd_ready
 
   load_site_defaults
   # Determine CA for registry and cluster trust
@@ -1556,7 +1556,7 @@ action_server() {
   ensure_staged_artifacts
   local SRC="$STAGE_DIR"
 
-  ensure_containerd_ready
+  #ensure_containerd_ready
 
   # If registries provided in YAML globals, wire mirrors; else avoid forcing system-default-registry
   if [[ -f "$CONFIG_FILE" ]] && [[ -n "$(yaml_spec_get "$CONFIG_FILE" registry || true)" ]]; then
@@ -1710,7 +1710,7 @@ action_agent() {
   log INFO "Ensuring staged artifacts for offline RKE2 agent install..."
   ensure_staged_artifacts
   local SRC="$STAGE_DIR"
-  ensure_containerd_ready
+  #ensure_containerd_ready
 
   # Trust the server CA if provided
   if [[ -n "$AGENT_CA_CERT" && -f "$AGENT_CA_CERT" ]]; then
@@ -1830,7 +1830,7 @@ action_add_server() {
   [[ -z "${PREFIX:-}" ]] && PREFIX=24
 
   ensure_staged_artifacts
-  ensure_containerd_ready
+  #ensure_containerd_ready
 
   # Write RKE2 config for join
   mkdir -p /etc/rancher/rke2
