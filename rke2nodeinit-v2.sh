@@ -226,7 +226,7 @@ yaml_spec_get_nested() {
 
 # Stage user-provided custom CA artifacts during image() without generating
 # Accepts standalone kind: custom_ca YAML or inline spec.customCA under kind: Image
-stage_custom_ca_in_image() {
+stage_custom_ca() {
   local did_stage=0
   local stage_dir="${PROJECT_ROOT:-/rke2-node-init}/downloads/custom-ca"
   mkdir -p "$stage_dir"
@@ -294,7 +294,7 @@ stage_custom_ca_in_image() {
 
   if (( did_stage == 1 )); then
     echo "staged=1" > "${stage_dir}/.manifest"
-    log INFO "[INFO] Custom CA artifacts staged for later use (server/agent phases)"
+    log INFO "[INFO] Custom CA artifacts staged for later use (server phase)"
   else
     log INFO "[INFO] No custom CA provided during image(); skipping"
   fi
