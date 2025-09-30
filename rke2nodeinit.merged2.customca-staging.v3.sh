@@ -1648,6 +1648,15 @@ NM
   mkdir -p "$DOWNLOADS_DIR"
   pushd "$DOWNLOADS_DIR" >/dev/null
 
+  # Prefetch custom-CA helper for offline use
+  if command -v curl >/dev/null 2>&1; then
+    local GEN_URL="https://raw.githubusercontent.com/k3s-io/k3s/refs/heads/main/contrib/util/generate-custom-ca-certs.sh"
+    log INFO "Fetching custom-CA helper script for offline use."
+    curl -fsSL -o "$DOWNLOADS_DIR/generate-custom-ca-certs.sh" "$GEN_URL" >>"$LOG_FILE" 2>&1 || true
+    chmod +x "$DOWNLOADS_DIR/generate-custom-ca-certs.sh" >>"$LOG_FILE" 2>&1 || true
+    log INFO "Staged custom-CA helper script for offline use."
+  fi
+
   # Pick version: from config/env or latest online
   if [[ -n "$REQ_VER" ]]; then
     RKE2_VERSION="$REQ_VER"
@@ -1694,6 +1703,11 @@ NM
     log INFO "Skipping nerdctl installation (per configuration)."
   fi
 
+  # Stage CA helper for offline use (no generation here)
+  #write_embedded_ca_helper
+  # Stage user-provided custom CA artifacts from YAML or prompt
+  stage_custom_ca_in_image
+
   # ------------------ Prompt for reboot ------------------
   echo
   echo "[READY] Minimal image prep complete. Cached artifacts in: $DOWNLOADS_DIR"
@@ -1717,12 +1731,7 @@ NM
         ;;
     esac
   fi
-  # Stage CA helper for offline use (no generation here)
-  write_embedded_ca_helper
-  # Optionally stage user-provided custom CA artifacts from YAML or prompt
-  stage_custom_ca_in_image
 }
-
 
 # ==============
 # Action: SERVER
