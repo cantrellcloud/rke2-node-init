@@ -3,9 +3,40 @@ kind: Server
 metadata:
   name: cluster1-server1
 spec:
+  # Host/OS
   ip: 10.0.0.10
   prefix: 24
   gateway: 10.0.4.1
   hostname: cluster1-server1
   dns: ["10.0.1.34", "10.231.1.34"]
   searchDomains: ["corp.local", "dev.kube"]
+
+  # RKE2 config.yaml (hyphen-case)
+  # If joining an existing/HA server, set 'server:'
+  #server: https://10.0.4.11:9345
+  token-file: /root/rke2.token
+  agent-token: my-agent-secret
+  write-kubeconfig-mode: "0640"
+  tls-san:
+    - cp-01
+    - api.dev.local
+    - 10.0.4.11
+  node-label:
+    - role=control-plane
+  service-cidr: 10.96.0.0/12
+  cluster-cidr: 10.42.0.0/16
+  cluster-domain: cluster.local
+  cni: calico
+  enable-servicelb: "false"
+  system-default-registry: altregistry.dev.kube
+  private-registry: /etc/rancher/rke2/registries.yaml
+  kube-apiserver-arg:
+    - "audit-log-maxage=15"
+
+  # Optional: your CA handling (script extension, not an RKE2 key)
+  customCA:
+    rootCrt: /certs/root.crt
+    rootKey: /certs/root.key
+    # intermediateCrt: /certs/intermediate.crt
+    # intermediateKey: /certs/intermediate.key
+    installToOSTrust: true

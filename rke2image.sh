@@ -54,8 +54,8 @@ SHA256_FILE="sha256sum-$ARCH.txt"
 RKE2_CA_GEN="generate-custom-ca-certs.sh"
 
 
-#########################
-##  F U N C T I O N S  ##
+################################################
+##  F U N C T I O N S  from rke2image.sh file ##
 
 detect_latest_rke2_version() {
   if [[ -z "${RKE2_VERSION:-}" ]]; then
