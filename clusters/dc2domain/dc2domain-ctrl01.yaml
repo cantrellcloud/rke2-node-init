@@ -1,11 +1,25 @@
 apiVersion: rkeprep/v1
 kind: Server
 metadata:
-  name: dc2domain-ctrl01
+  name: j64domain-ctrl01
 spec:
-  ip: 10.0.4.151
+  ip: 10.0.4.141
   prefix: 24
   gateway: 10.0.4.1
-  hostname: dc2domain-ctrl01
+  hostname: j64domain-ctrl01
   dns: ["10.0.1.34", "10.231.1.34"]
   searchDomains: ["dev.kube", "dev.local"]
+
+  service-cidr: 10.90.0.0/16
+  cluster-cidr: 10.240.0.0/16
+  cluster-domain: cluster.local
+  enable-servicelb: "false"
+  system-default-registry: altregistry.dev.kube
+  private-registry: /etc/rancher/rke2/registries.yaml
+  kube-apiserver-arg:
+    - "audit-log-maxage=15"
+
+  customCA:
+    rootCrt: /certs/dev-certa001-ca-dev-local.crt
+    rootKey: /certs/dev-certa001-ca-dev-local-key.pem
+    installToOSTrust: true
