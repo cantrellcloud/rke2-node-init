@@ -9,7 +9,8 @@ spec:
   hostname: j64manager-ctrl01
   dns: ["10.0.1.34", "10.231.1.34"]
   searchDomains: ["dev.kube", "dev.local"]
-
+  cluster-init: true
+  token: 59c50f5dd8c756619922e3a84e408a4c70af2bbdf57682c3229f5dd7e034be45
   write-kubeconfig-mode: "0640"
   tls-san:
     - j64manager-ctrl01
