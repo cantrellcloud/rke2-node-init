@@ -81,7 +81,6 @@ DEFAULT_DNS="10.0.1.34,10.231.1.34"
 AUTO_YES=0                  # -y auto-confirm reboots *and* Docker removal if detected
 PRINT_CONFIG=0              # -P print sanitized YAML
 DRY_PUSH=0                  # --dry-push skips actual registry push
-RUNTIME="nerdctl"           # fixed; Docker removed
 
 # Artifacts
 IMAGES_TAR="rke2-images.linux-$ARCH.tar.zst"
@@ -126,7 +125,7 @@ Options:
   -h          Show this help
   --dry-push  Do not actually push images to registry (simulate only)
 Image action:
-  Does the full prep for an air‑gapped base image:
+  Does the full prep for an air-gapped base image:
     - Installs OS prerequisites and disables swap
     - Caches nerdctl FULL bundle (containerd + runc + CNI + BuildKit + nerdctl)
     - Detects & downloads RKE2 artifacts (images, tarball, checksums, installer)
@@ -137,7 +136,7 @@ Image action:
 
 
 Actions:
-  image        Prepare a base image for air‑gapped use (installs ONLY standalone nerdctl; caches FULL bundle)
+  image        Prepare a base image for air-gapped use (installs ONLY standalone nerdctl; caches FULL bundle)
   airgap       Run 'image' without reboot and power off the machine for templating
 
 Outputs:
@@ -445,7 +444,8 @@ EOF
 
 purge_old_netplan() {
   # back up and remove all existing netplan YAMLs to avoid merged old configs
-  local bdir="/etc/netplan/.backup-$(date -u +%Y%m%dT%H%M%SZ)"
+  local bdir
+  bdir=$("/etc/netplan/.backup-$(date -u +%Y%m%dT%H%M%SZ)")
   mkdir -p "$bdir"
   shopt -s nullglob
   local moved=0
@@ -1433,6 +1433,7 @@ action_image() {
     echo "RKE2_VERSION: ${RKE2_VERSION}"
     echo "REGISTRY: ${REGISTRY}"
     echo
+	echo "Hashes and sizes of cached artifacts in $DOWNLOADS_DIR:"
     for f in "$DOWNLOADS_DIR/$IMAGES_TAR" "$DOWNLOADS_DIR/$RKE2_TARBALL" "$DOWNLOADS_DIR/$SHA256_FILE" "$DOWNLOADS_DIR/install.sh" "$DOWNLOADS_DIR/$full_tgz" "$DOWNLOADS_DIR/$std_tgz"; do
       [[ -f "$f" ]] || continue
       sha256sum "$f"
@@ -1554,10 +1555,10 @@ action_server() {
 
     # Kubelet defaults (safe; additive). Merge-friendly if you later append more.
     echo "kubelet-arg:"
-  #  # Prefer systemd-resolved if present
-  #  if [[ -f /run/systemd/resolve/resolv.conf ]]; then
-  #    echo "  - resolv-conf=/run/systemd/resolve/resolv.conf"
-  #  fi
+    # Prefer systemd-resolved if present
+    if [[ -f /run/systemd/resolve/resolv.conf ]]; then
+      echo "  - resolv-conf=/run/systemd/resolve/resolv.conf"
+    fi
     echo "  - container-log-max-size=10Mi"
     echo "  - container-log-max-files=5"
     echo "  - protect-kernel-defaults=true"
@@ -1565,16 +1566,15 @@ action_server() {
     echo "write-kubeconfig-mode: \"0640\""
     # Leave system-default-registry unset to preserve cached naming.
   } >> /etc/rancher/rke2/config.yaml
-  
-  log INFO "Setting file security: /etc/rancher/rke2/config.yaml..."
-  chmod 600 /etc/rancher/rke2/config.yaml
-  
+
   log INFO "Append additional keys from YAML spec (cluster-cidr, domain, cni, etc.)..."
   append_spec_config_extras "$CONFIG_FILE"
 
- # log INFO "Wrote /etc/rancher/rke2/config.yaml (cluster-init=${CLUSTER_INIT})"
   log INFO "Wrote /etc/rancher/rke2/config.yaml"
 
+  log INFO "Setting file security: chmod 600 /etc/rancher/rke2/config.yaml..."
+  chmod 600 /etc/rancher/rke2/config.yaml
+  
   write_netplan "$IP" "$PREFIX" "${GW:-}" "${DNS:-}" "${SEARCH:-}"
 
   log INFO "Installing rke2-server from cache at $STAGE_DIR"
@@ -1585,17 +1585,7 @@ action_server() {
   echo "[READY] rke2-server installed. Reboot to initialize the control plane."
   echo "        First server token: /var/lib/rancher/rke2/server/node-token"
   echo
-
-  if (( AUTO_YES )); then
-    log WARN "Auto-confirm enabled (-y). Rebooting now..."
-    sleep 2; reboot
-  else
-    read -r -p "Reboot now to bring up the control plane? [y/N]: " _ans
-    case "${_ans,,}" in
-      y|yes) log WARN "Rebooting..."; sleep 2; reboot;;
-      *)     log INFO "Reboot deferred. Start later with: systemctl enable --now rke2-server";;
-    esac
-  fi
+  prompt_reboot
 }
 
 # ==================
