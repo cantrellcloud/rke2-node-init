@@ -31,8 +31,6 @@ esac
 #   5) verify - Check that node prerequisites are in place
 #
 # Major changes vs previous:
-#   - Docker support removed end-to-end.
-#   - If Docker is present, we *ask* to uninstall it before proceeding.
 #   - Runtime install uses official "nerdctl-full" bundle (includes containerd, runc, CNI, BuildKit).
 #   - Fixed verify() return code logic so success returns 0.
 #   - Added progress indicators + extra logging for containerd/nerdctl install.
@@ -178,7 +176,7 @@ spinner_run() {
     sleep 0.15
   done
 
-  # <-- this is the critical change: protect wait from set -e
+  # Protect wait from set -e
   local rc
   if wait "$pid"; then
     rc=0
@@ -433,6 +431,33 @@ load_site_defaults() {
   else
     DEFAULT_SEARCH=""
   fi
+}
+
+# Build a comma CSV of default SANs from hostname/IP/search domains.
+# usage: capture_sans "<HOSTNAME>" "<IP>" "<SEARCH_CSV>"
+capture_sans() {
+  local hn="$1" ip="$2" search_csv="$3"
+  local out="$hn,$ip"
+  if [[ -n "$search_csv" ]]; then
+    IFS=',' read -r -a _sd <<<"$search_csv"
+    for d in "${_sd[@]}"; do
+      d="${d// /}"
+      [[ -n "$d" ]] && out+=",$hn.$d"
+    done
+  fi
+  printf '%s' "$out"
+}
+
+# Emit a tls-san: list given a CSV string (no empty lines)
+emit_tls_sans() {
+  local csv="$1"
+  [[ -z "$csv" ]] && return 0
+  echo "tls-san:"
+  IFS=',' read -r -a _sans <<<"$csv"
+  for s in "${_sans[@]}"; do
+    s="${s//\"/}"; s="${s// /}"
+    [[ -n "$s" ]] && echo "  - \"$s\""
+  done
 }
 
 # ---------- OS prereqs --------------------------------------------------------------------------
@@ -1332,6 +1357,114 @@ action_image() {
   prompt_reboot
 }
 
+# ==============
+# Action: SERVER (bootstrap a brand-new control plane)
+# Uses cached artifacts from action_image() and writes /etc/rancher/rke2/config.yaml
+action_server() {
+  if [[ -n "$CONFIG_FILE" ]]; then ensure_yaml_has_metadata_name "$CONFIG_FILE"; fi
+  load_site_defaults
+
+  local IP="" PREFIX="" HOSTNAME="" DNS="" SEARCH="" GW=""
+  local TLS_SANS_IN="" TLS_SANS="" TOKEN="" CLUSTER_INIT="true"
+
+  if [[ -n "$CONFIG_FILE" ]]; then
+    IP="$(yaml_spec_get "$CONFIG_FILE" ip || true)"
+    PREFIX="$(yaml_spec_get "$CONFIG_FILE" prefix || true)"
+    HOSTNAME="$(yaml_spec_get "$CONFIG_FILE" hostname || true)"
+    GW="$(yaml_spec_get "$CONFIG_FILE" gateway || true)"
+    local d sd ts
+    d="$(yaml_spec_get "$CONFIG_FILE" dns || true)"; [[ -n "$d"  ]] && DNS="$(normalize_list_csv "$d")"
+    sd="$(yaml_spec_get "$CONFIG_FILE" searchDomains || true)"; [[ -n "$sd" ]] && SEARCH="$(normalize_list_csv "$sd")"
+    ts="$(yaml_spec_get "$CONFIG_FILE" tlsSans || true)"; [[ -n "$ts" ]] && TLS_SANS_IN="$(normalize_list_csv "$ts")"
+    TOKEN="$(yaml_spec_get "$CONFIG_FILE" token || true)"
+    CLUSTER_INIT="$(yaml_spec_get "$CONFIG_FILE" clusterInit || echo true)"
+  fi
+
+  # Fill missing basics
+  [[ -z "$HOSTNAME" ]] && HOSTNAME="$(hostnamectl --static 2>/dev/null || hostname)"
+  [[ -z "$IP"       ]] && read -rp "Enter static IPv4 for this server node: " IP
+  [[ -z "$PREFIX"   ]] && read -rp "Enter subnet prefix length (0-32) [default 24]: " PREFIX
+  [[ -z "$GW"       ]] && read -rp "Enter default gateway IPv4 [leave blank to skip]: " GW || true
+
+  if [[ -z "$DNS" ]]; then
+    read -rp "Enter DNS IPv4s (comma-separated) [blank=default ${DEFAULT_DNS}]: " DNS || true
+    [[ -z "$DNS" ]] && DNS="$DEFAULT_DNS"
+  fi
+  [[ -z "$SEARCH" && -n "${DEFAULT_SEARCH:-}" ]] && SEARCH="$DEFAULT_SEARCH"
+
+  # Validate
+  while ! valid_ipv4 "$IP"; do read -rp "Invalid IPv4. Re-enter server IP: " IP; done
+  while ! valid_prefix "${PREFIX:-}"; do read -rp "Invalid prefix (0-32). Re-enter [default 24]: " PREFIX; done
+  while ! valid_ipv4_or_blank "${GW:-}"; do read -rp "Invalid gateway IPv4 (or blank). Re-enter: " GW; done
+  while ! valid_csv_dns "${DNS:-}"; do read -rp "Invalid DNS list. Re-enter CSV IPv4s: " DNS; done
+  while ! valid_search_domains_csv "${SEARCH:-}"; do read -rp "Invalid search domains CSV. Re-enter: " SEARCH; done
+  [[ -z "${PREFIX:-}" ]] && PREFIX=24
+
+  # Auto-derive tls-sans if none provided in YAML
+  if [[ -n "$TLS_SANS_IN" ]]; then
+    TLS_SANS="$TLS_SANS_IN"
+  else
+    TLS_SANS="$(capture_sans "$HOSTNAME" "$IP" "$SEARCH")"
+    log INFO "Auto-derived TLS SANs: $TLS_SANS"
+  fi
+
+  ensure_staged_artifacts
+  install_rke2_prereqs
+
+  hostnamectl set-hostname "$HOSTNAME"
+  if ! grep -qE "[[:space:]]$HOSTNAME(\$|[[:space:]])" /etc/hosts; then echo "$IP $HOSTNAME" >> /etc/hosts; fi
+  write_netplan "$IP" "$PREFIX" "${GW:-}" "${DNS:-}" "${SEARCH:-}"
+
+  mkdir -p /etc/rancher/rke2
+  : > /etc/rancher/rke2/config.yaml
+  {
+    echo "cluster-init: ${CLUSTER_INIT}"
+    echo "node-ip: \"$IP\""
+    emit_tls_sans "$TLS_SANS"
+
+    # Kubelet defaults (safe; additive). Merge-friendly if you later append more.
+    echo "kubelet-arg:"
+    # Prefer systemd-resolved if present
+    if [[ -f /run/systemd/resolve/resolv.conf ]]; then
+      echo "  - resolv-conf=/run/systemd/resolve/resolv.conf"
+    fi
+    echo "  - container-log-max-size=10Mi"
+    echo "  - container-log-max-files=5"
+    echo "  - protect-kernel-defaults=true"
+
+    # Optional but recommended: stable join secret for future nodes
+    if [[ -n "$TOKEN" ]]; then
+      echo "token: \"$TOKEN\""
+    fi
+
+    echo "write-kubeconfig-mode: \"0640\""
+    # Leave system-default-registry unset to preserve cached naming.
+  } >> /etc/rancher/rke2/config.yaml
+  chmod 600 /etc/rancher/rke2/config.yaml
+  log INFO "Wrote /etc/rancher/rke2/config.yaml (cluster-init=${CLUSTER_INIT})"
+
+  setup_custom_cluster_ca || true
+
+  log INFO "Installing rke2-server from cache at $STAGE_DIR"
+  run_rke2_installer "$STAGE_DIR" "server"
+  systemctl enable rke2-server >>"$LOG_FILE" 2>&1 || true
+
+  echo
+  echo "[READY] rke2-server installed. Reboot to initialize the control plane."
+  echo "        First server token: /var/lib/rancher/rke2/server/node-token"
+  echo
+
+  if (( AUTO_YES )); then
+    log WARN "Auto-confirm enabled (-y). Rebooting now..."
+    sleep 2; reboot
+  else
+    read -r -p "Reboot now to bring up the control plane? [y/N]: " _ans
+    case "${_ans,,}" in
+      y|yes) log WARN "Rebooting..."; sleep 2; reboot;;
+      *)     log INFO "Reboot deferred. Start later with: systemctl enable --now rke2-server";;
+    esac
+  fi
+}
 
 # ==================
 # Action: AGENT
@@ -1491,29 +1624,35 @@ action_add_server() {
 
   ensure_staged_artifacts
 
+  # Derive TLS SANs if not provided
+  local TLS_SANS_IN TLS_SANS
+  TLS_SANS_IN="$(yaml_spec_get "$CONFIG_FILE" tlsSans || true)"
+  if [[ -n "$TLS_SANS_IN" ]]; then
+    TLS_SANS="$(normalize_list_csv "$TLS_SANS_IN")"
+  else
+    TLS_SANS="$(_autosan_csv "$HOSTNAME" "$IP" "$SEARCH")"
+    log INFO "Auto-derived TLS SANs: $TLS_SANS"
+  fi
+
   # Write RKE2 config for join
   mkdir -p /etc/rancher/rke2
   # Preserve existing config (system-default-registry) if present; then append join settings
   if [[ ! -f /etc/rancher/rke2/config.yaml ]]; then
     : > /etc/rancher/rke2/config.yaml
   fi
-
   {
-    echo "server: \"$URL\""
-    if [[ -n "$TOKEN_FILE" ]]; then
-      echo "token_file: \"$TOKEN_FILE\""
-    else
-      echo "token: \"$TOKEN\""
+    echo "server: \"$SERVER_URL\""     # required
+    echo "token: \"$TOKEN\""           # required
+    echo "node-ip: \"$IP\""
+    _emit_tls_san_yaml "$TLS_SANS"
+    echo "kubelet-arg:"
+    if [[ -f /run/systemd/resolve/resolv.conf ]]; then
+      echo "  - resolv-conf=/run/systemd/resolve/resolv.conf"
     fi
-    if [[ -n "$TLS_SANS" ]]; then
-      echo "tls-san:"
-      IFS=',' read -r -a _sans <<<"$TLS_SANS"
-      for s in "${_sans[@]}"; do
-        s="${s//\"/}"
-        s="${s// /}"
-        [[ -n "$s" ]] && echo "  - \"$s\""
-      done
-    fi
+    echo "  - container-log-max-size=10Mi"
+    echo "  - container-log-max-files=5"
+    echo "  - protect-kernel-defaults=true"
+    echo "write-kubeconfig-mode: \"0640\""
   } >> /etc/rancher/rke2/config.yaml
   chmod 600 /etc/rancher/rke2/config.yaml
 
@@ -1631,7 +1770,7 @@ case "${ACTION:-}" in
   server)      action_server ;;
   agent)       action_agent  ;;
   verify)      action_verify ;;
-  add_server) action_add_server ;;
+  add-server|add_server) action_add_server ;;
   airgap)      action_airgap ;;
   push)        action_push   ;;
   *) print_help; exit 1 ;;
