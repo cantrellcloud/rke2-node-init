@@ -1484,7 +1484,7 @@ action_server() {
   load_site_defaults
 
   local IP="" PREFIX="" HOSTNAME="" DNS="" SEARCH="" GW=""
-  local TLS_SANS_IN="" TLS_SANS="" TOKEN="" #CLUSTER_INIT="true"
+  local TLS_SANS_IN="" TLS_SANS="" TOKEN="" CLUSTER_INIT="true"
 
   if [[ -n "$CONFIG_FILE" ]]; then
     IP="$(yaml_spec_get "$CONFIG_FILE" ip || true)"
@@ -1496,7 +1496,7 @@ action_server() {
     sd="$(yaml_spec_get "$CONFIG_FILE" searchDomains || true)"; [[ -n "$sd" ]] && SEARCH="$(normalize_list_csv "$sd")"
     ts="$(yaml_spec_get_any "$CONFIG_FILE" tlsSans tls-san || true)"; [[ -z "$ts" ]] && ts="$(yaml_spec_list_csv "$CONFIG_FILE" tls-san || true)"; [[ -n "$ts" ]] && TLS_SANS_IN="$(normalize_list_csv "$ts")"
     TOKEN="$(yaml_spec_get "$CONFIG_FILE" token || true)"
-    #CLUSTER_INIT="$(yaml_spec_get "$CONFIG_FILE" clusterInit || echo true)"
+    CLUSTER_INIT="$(yaml_spec_get "$CONFIG_FILE" clusterInit || echo true)"
   fi
 
   # Fill missing basics
@@ -1521,12 +1521,12 @@ action_server() {
   [[ -z "${PREFIX:-}" ]] && PREFIX=24
 
   # Auto-derive tls-sans if none provided in YAML
-  #if [[ -n "$TLS_SANS_IN" ]]; then
-  #  TLS_SANS="$TLS_SANS_IN"
-  #else
-  #  TLS_SANS="$(capture_sans "$HOSTNAME" "$IP" "$SEARCH")"
-  #  log INFO "Auto-derived TLS SANs: $TLS_SANS"
-  #fi
+  if [[ -n "$TLS_SANS_IN" ]]; then
+    TLS_SANS="$TLS_SANS_IN"
+  else
+    TLS_SANS="$(capture_sans "$HOSTNAME" "$IP" "$SEARCH")"
+    log INFO "Auto-derived TLS SANs: $TLS_SANS"
+  fi
 
   log INFO "Ensuring staged artifacts for offline RKE2 server install..."
   ensure_staged_artifacts
@@ -1540,9 +1540,9 @@ action_server() {
   mkdir -p /etc/rancher/rke2
   : > /etc/rancher/rke2/config.yaml
   {
-    #echo "cluster-init: ${CLUSTER_INIT}"
+    echo "cluster-init: ${CLUSTER_INIT:-true}"
     echo "node-ip: \"$IP\""
-   # emit_tls_sans "$TLS_SANS"
+    emit_tls_sans "$TLS_SANS"
 
     # Kubelet defaults (safe; additive). Merge-friendly if you later append more.
     echo "kubelet-arg:"
@@ -1563,7 +1563,7 @@ action_server() {
     # Leave system-default-registry unset to preserve cached naming.
   } >> /etc/rancher/rke2/config.yaml
   
- # chmod 600 /etc/rancher/rke2/config.yaml
+  chmod 600 /etc/rancher/rke2/config.yaml
   
   log INFO "Append additional keys from YAML spec (cluster-cidr, domain, cni, etc.)..."
   append_spec_config_extras "$CONFIG_FILE"

@@ -3,6 +3,8 @@ kind: Server
 metadata:
   name: j64manager-ctrl01
 spec:
+  cluster-init: true
+  token: 59c50f5dd8c756619922e3a84e408a4c70af2bbdf57682c3229f5dd7e034be45
   ip: 10.1.1.216
   prefix: 24
   gateway: 10.1.1.1
