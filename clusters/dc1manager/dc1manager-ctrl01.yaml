@@ -27,7 +27,7 @@ spec:
   cluster-domain: cluster.local
   cni: canal
   enable-servicelb: "false"
-  system-default-registry: altregistry.dev.kube/rke2
+  system-default-registry: altregistry.dev.kube
   private-registry: /etc/rancher/rke2/registries.yaml
   kube-apiserver-arg:
     - "audit-log-maxage=15"
