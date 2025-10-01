@@ -16,8 +16,6 @@ spec:
     - j64manager-cluster
     - j64manager-cluster.dev.kube
     - 10.0.4.131
-    - 10.0.4.132
-    - 10.0.4.133
   node-taint:
   - "node-role.kubernetes.io/control-plane:NoSchedule
   node-label:
