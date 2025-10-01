@@ -1485,7 +1485,7 @@ action_server() {
 
   local IP="" PREFIX="" HOSTNAME="" DNS="" SEARCH="" GW=""
   local TLS_SANS_IN="" TLS_SANS="" CLUSTER_INIT="true"
-  local declare -i TOKEN=0
+  declare -i TOKEN=0
 
   if [[ -n "$CONFIG_FILE" ]]; then
     IP="$(yaml_spec_get "$CONFIG_FILE" ip || true)"
@@ -1614,7 +1614,7 @@ action_agent() {
 
   local IP="" PREFIX="" HOSTNAME="" DNS="" SEARCH="" GW=""
   local URL=""
-  declare TOKEN=0
+  declare -i TOKEN=0
 
   if [[ -n "$CONFIG_FILE" ]]; then
     IP="$(yaml_spec_get "$CONFIG_FILE" ip || true)"
@@ -1706,7 +1706,7 @@ action_add_server() {
 
   local IP="" PREFIX="" HOSTNAME="" DNS="" SEARCH="" GW=""
   local URL="" TOKEN_FILE="" TLS_SANS=""
-  declare TOKEN=0
+  declare -i TOKEN=0
 
   if [[ -n "$CONFIG_FILE" ]]; then
     IP="$(yaml_spec_get "$CONFIG_FILE" ip || true)"
