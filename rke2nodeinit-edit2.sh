@@ -266,7 +266,7 @@ yaml_spec_list_items() {
       if (collect==1) {
         if ($0 ~ "^[[:space:]]*-[[:space:]]+(.*)$") {
           sub(/^[[:space:]]*-[[:space:]]+/, "", $0)
-          gsub(/^"|\'|"$/, "", $0)
+          gsub(/^"|'\''|"$/, "", $0)
           print $0
         } else if ($0 ~ "^[[:space:]]*$") {
           next
@@ -373,10 +373,10 @@ ensure_yaml_has_metadata_name() {
 
 sanitize_yaml() {
   sed -E \
-    -e 's/(registryPassword:[[ :space: ]]*)"[^"]*"/\1"********"/' \
-    -e 's/(registryPassword:[[ :space: ]]*)([^"[:space:]].*)/\1"********"/' \
-    -e 's/(token:[[ :space: ]]*)"[^"]*"/\1"********"/' \
-    -e 's/(token:[[ :space: ]]*)([^"[:space:]].*)/\1"********"/' \
+    -e 's/(registryPassword:[[:space:]]*)"[^"]*"/\1"********"/' \
+    -e 's/(registryPassword:[[:space:]]*)([^"[:space:]].*)/\1"********"/' \
+    -e 's/(token:[[:space:]]*)"[^"]*"/\1"********"/' \
+    -e 's/(token:[[:space:]]*)([^"[:space:]].*)/\1"********"/' \
     "$1"
 }
 
