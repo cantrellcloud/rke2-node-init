@@ -19,10 +19,10 @@ spec:
     - 10.0.4.132
     - 10.0.4.133
   node-taint:
-  node-taint:
   - "node-role.kubernetes.io/control-plane:NoSchedule"
   node-label:
   - "env=preprod"
+  service-cidr: 10.90.0.0/16
   cluster-cidr: 10.240.0.0/16
   cluster-domain: cluster.local
   cni: canal
