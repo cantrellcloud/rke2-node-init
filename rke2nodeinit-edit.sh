@@ -1401,15 +1401,15 @@ action_server() {
   [[ -z "${PREFIX:-}" ]] && PREFIX=24
 
   # Auto-derive tls-sans if none provided in YAML
-  if [[ -n "$TLS_SANS_IN" ]]; then
-    TLS_SANS="$TLS_SANS_IN"
-  else
-    TLS_SANS="$(capture_sans "$HOSTNAME" "$IP" "$SEARCH")"
-    log INFO "Auto-derived TLS SANs: $TLS_SANS"
-  fi
+  #if [[ -n "$TLS_SANS_IN" ]]; then
+  #  TLS_SANS="$TLS_SANS_IN"
+  #else
+  #  TLS_SANS="$(capture_sans "$HOSTNAME" "$IP" "$SEARCH")"
+  #  log INFO "Auto-derived TLS SANs: $TLS_SANS"
+  #fi
 
   ensure_staged_artifacts
-  install_rke2_prereqs
+  #install_rke2_prereqs
 
   hostnamectl set-hostname "$HOSTNAME"
   if ! grep -qE "[[:space:]]$HOSTNAME(\$|[[:space:]])" /etc/hosts; then echo "$IP $HOSTNAME" >> /etc/hosts; fi
