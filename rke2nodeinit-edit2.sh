@@ -1484,7 +1484,7 @@ action_server() {
   load_site_defaults
 
   local IP="" PREFIX="" HOSTNAME="" DNS="" SEARCH="" GW=""
-  local TLS_SANS_IN="" TLS_SANS="" TOKEN="" CLUSTER_INIT="true"
+  local TLS_SANS_IN="" TLS_SANS="" TOKEN="" #CLUSTER_INIT="true"
 
   if [[ -n "$CONFIG_FILE" ]]; then
     IP="$(yaml_spec_get "$CONFIG_FILE" ip || true)"
@@ -1561,7 +1561,8 @@ action_server() {
     echo "write-kubeconfig-mode: \"0640\""
     # Leave system-default-registry unset to preserve cached naming.
   } >> /etc/rancher/rke2/config.yaml
-  chmod 600 /etc/rancher/rke2/config.yaml
+  
+ # chmod 600 /etc/rancher/rke2/config.yaml
   # Append additional keys from YAML spec (cluster-cidr, domain, cni, etc.)
   append_spec_config_extras "$CONFIG_FILE"
  # log INFO "Wrote /etc/rancher/rke2/config.yaml (cluster-init=${CLUSTER_INIT})"
