@@ -1534,7 +1534,8 @@ action_server() {
   log INFO "Setting new hostname: $HOSTNAME..."
   hostnamectl set-hostname "$HOSTNAME"
   if ! grep -qE "[[:space:]]$HOSTNAME(\$|[[:space:]])" /etc/hosts; then echo "$IP $HOSTNAME" >> /etc/hosts; fi
-  write_netplan "$IP" "$PREFIX" "${GW:-}" "${DNS:-}" "${SEARCH:-}"
+
+  setup_custom_cluster_ca || true
 
   mkdir -p /etc/rancher/rke2
   : > /etc/rancher/rke2/config.yaml
@@ -1563,12 +1564,14 @@ action_server() {
   } >> /etc/rancher/rke2/config.yaml
   
  # chmod 600 /etc/rancher/rke2/config.yaml
-  # Append additional keys from YAML spec (cluster-cidr, domain, cni, etc.)
+  
+  log INFO "Append additional keys from YAML spec (cluster-cidr, domain, cni, etc.)..."
   append_spec_config_extras "$CONFIG_FILE"
+
  # log INFO "Wrote /etc/rancher/rke2/config.yaml (cluster-init=${CLUSTER_INIT})"
   log INFO "Wrote /etc/rancher/rke2/config.yaml"
 
-  setup_custom_cluster_ca || true
+  write_netplan "$IP" "$PREFIX" "${GW:-}" "${DNS:-}" "${SEARCH:-}"
 
   log INFO "Installing rke2-server from cache at $STAGE_DIR"
   run_rke2_installer "$STAGE_DIR" "server"
