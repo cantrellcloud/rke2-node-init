@@ -1484,8 +1484,7 @@ action_server() {
   load_site_defaults
 
   local IP="" PREFIX="" HOSTNAME="" DNS="" SEARCH="" GW=""
-  local TLS_SANS_IN="" TLS_SANS="" CLUSTER_INIT="true"
-  declare -i TOKEN=0
+  local TLS_SANS_IN="" TLS_SANS="" CLUSTER_INIT="true" TOKEN=""
 
   if [[ -n "$CONFIG_FILE" ]]; then
     IP="$(yaml_spec_get "$CONFIG_FILE" ip || true)"
@@ -1496,7 +1495,7 @@ action_server() {
     d="$(yaml_spec_get "$CONFIG_FILE" dns || true)"; [[ -n "$d"  ]] && DNS="$(normalize_list_csv "$d")"
     sd="$(yaml_spec_get "$CONFIG_FILE" searchDomains || true)"; [[ -n "$sd" ]] && SEARCH="$(normalize_list_csv "$sd")"
     ts="$(yaml_spec_get_any "$CONFIG_FILE" tlsSans tls-san || true)"; [[ -z "$ts" ]] && ts="$(yaml_spec_list_csv "$CONFIG_FILE" tls-san || true)"; [[ -n "$ts" ]] && TLS_SANS_IN="$(normalize_list_csv "$ts")"
-    TOKEN=$(yaml_spec_get "$CONFIG_FILE" token || true)
+    TOKEN="$(yaml_spec_get "$CONFIG_FILE" token || true)"
     CLUSTER_INIT="$(yaml_spec_get "$CONFIG_FILE" clusterInit || echo true)"
   fi
 
@@ -1556,7 +1555,7 @@ action_server() {
     echo "  - protect-kernel-defaults=true"
 
     # Optional but recommended: stable join secret for future nodes
-    if [[ -n $TOKEN ]]; then
+    if [[ -n "$TOKEN" ]]; then
       echo "token: $TOKEN"
     fi
 
@@ -1613,8 +1612,7 @@ action_agent() {
   load_site_defaults
 
   local IP="" PREFIX="" HOSTNAME="" DNS="" SEARCH="" GW=""
-  local URL=""
-  declare -i TOKEN=0
+  local URL="" TOKEN=""
 
   if [[ -n "$CONFIG_FILE" ]]; then
     IP="$(yaml_spec_get "$CONFIG_FILE" ip || true)"
@@ -1625,7 +1623,7 @@ action_agent() {
     sd="$(yaml_spec_get "$CONFIG_FILE" searchDomains || true)"; [[ -n "$sd" ]] && SEARCH="$(normalize_list_csv "$sd")"
     GW="$(yaml_spec_get "$CONFIG_FILE" gateway || true)"
     URL="$(yaml_spec_get_any "$CONFIG_FILE" serverURL server url || true)"
-    TOKEN=$(yaml_spec_get "$CONFIG_FILE" token || true)
+    TOKEN="$(yaml_spec_get "$CONFIG_FILE" token || true)"
   fi
 
   if [[ -z "$IP" ]];      then read -rp "Enter static IPv4 for this agent node: " IP; fi
@@ -1647,7 +1645,7 @@ action_agent() {
   if [[ -z "$URL" ]]; then
     read -rp "Enter RKE2 server URL (e.g., https://<server-ip>:9345) [optional]: " URL || true
   fi
-  if [[ -n "$URL" && -z $TOKEN ]]; then
+  if [[ -n "$URL" && -z "$TOKEN" ]]; then
     read -rp "Enter cluster join token [optional]: " TOKEN || true
   fi
 
@@ -1676,7 +1674,7 @@ action_agent() {
 
   mkdir -p /etc/rancher/rke2
   if [[ -n "$URL" ]];   then echo "server: \"$URL\"" >> /etc/rancher/rke2/config.yaml; fi
-  if [[ -n $TOKEN ]]; then echo "token: $TOKEN"  >> /etc/rancher/rke2/config.yaml; fi
+  if [[ -n "$TOKEN" ]]; then echo "token: $TOKEN"  >> /etc/rancher/rke2/config.yaml; fi
 
   hostnamectl set-hostname "$HOSTNAME"
   if ! grep -q "$HOSTNAME" /etc/hosts; then echo "$IP $HOSTNAME" >> /etc/hosts; fi
@@ -1705,8 +1703,7 @@ action_add_server() {
   load_site_defaults
 
   local IP="" PREFIX="" HOSTNAME="" DNS="" SEARCH="" GW=""
-  local URL="" TOKEN_FILE="" TLS_SANS=""
-  declare -i TOKEN=0
+  local URL="" TOKEN_FILE="" TLS_SANS="" TOKEN=""
 
   if [[ -n "$CONFIG_FILE" ]]; then
     IP="$(yaml_spec_get "$CONFIG_FILE" ip || true)"
@@ -1717,7 +1714,7 @@ action_add_server() {
     sd="$(yaml_spec_get "$CONFIG_FILE" searchDomains || true)"; [[ -n "$sd" ]] && SEARCH="$(normalize_list_csv "$sd")"
     GW="$(yaml_spec_get "$CONFIG_FILE" gateway || true)"
     URL="$(yaml_spec_get_any "$CONFIG_FILE" serverURL server url || true)"
-    TOKEN=$(yaml_spec_get "$CONFIG_FILE" token || true)
+    TOKEN="$(yaml_spec_get "$CONFIG_FILE" token || true)"
     TOKEN_FILE="$(yaml_spec_get "$CONFIG_FILE" tokenFile || true)"
     ts="$(yaml_spec_get_any "$CONFIG_FILE" tlsSans tls-san || true)"; [[ -z "$ts" ]] && ts="$(yaml_spec_list_csv "$CONFIG_FILE" tls-san || true)"; [[ -n "$ts" ]] && TLS_SANS_IN="$(normalize_list_csv "$ts")"
   fi
@@ -1737,9 +1734,9 @@ action_add_server() {
 
   # Cluster join info
   [[ -z "$URL" ]] && read -rp "Enter EXISTING RKE2 server URL (e.g. https://<vip-or-node>:9345): " URL
-  if [[ -z $TOKEN && -z "$TOKEN_FILE" ]]; then
+  if [[ -z "$TOKEN" && -z "$TOKEN_FILE" ]]; then
     read -rp "Enter cluster join token (leave blank to provide a token file path): " TOKEN || true
-    if [[ -z $TOKEN ]]; then
+    if [[ -z "$TOKEN" ]]; then
       read -rp "Enter path to token file (e.g., /var/lib/rancher/rke2/server/node-token): " TOKEN_FILE || true
     fi
   fi
