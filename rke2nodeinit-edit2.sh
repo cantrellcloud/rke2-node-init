@@ -1541,6 +1541,7 @@ action_server() {
   mkdir -p /etc/rancher/rke2
   : > /etc/rancher/rke2/config.yaml
   {
+    echo "debug: true"
     echo "cluster-init: ${CLUSTER_INIT:-true}"
 
     # Optional but recommended: stable join secret for future nodes
@@ -1549,7 +1550,7 @@ action_server() {
     fi
 
     echo "node-ip: \"$IP\""
-  #  emit_tls_sans "$TLS_SANS"
+    emit_tls_sans "$TLS_SANS"
 
     # Kubelet defaults (safe; additive). Merge-friendly if you later append more.
     echo "kubelet-arg:"
