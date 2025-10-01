@@ -1534,7 +1534,7 @@ action_server() {
   mkdir -p /etc/rancher/rke2
   : > /etc/rancher/rke2/config.yaml
   {
-    echo "cluster-init: ${CLUSTER_INIT}"
+    #echo "cluster-init: ${CLUSTER_INIT}"
     echo "node-ip: \"$IP\""
     emit_tls_sans "$TLS_SANS"
 
