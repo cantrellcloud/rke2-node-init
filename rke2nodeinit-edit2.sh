@@ -66,7 +66,7 @@ mkdir -p "$LOG_DIR" "$OUT_DIR" "$DOWNLOADS_DIR" "$STAGE_DIR" "$SBOM_DIR"
 
 # ---------- Defaults & tunables ----------------------------------------------------------------
 RKE2_VERSION=""                                       # auto-detect if empty
-REGISTRY="rke2registry.dev.local/rke2"
+REGISTRY="rke2registry.dev.local"
 REG_USER="admin"
 REG_PASS="ZAQwsx!@#123"
 CONFIG_FILE=""
@@ -939,7 +939,7 @@ setup_image_resolution_strategy() {
   fi
 
   # Fallbacks if still empty
-  primary_registry="${primary_registry:-${REGISTRY:-'rke2registry.dev.local/rke2'}}"
+  primary_registry="${primary_registry:-${REGISTRY:-'rke2registry.dev.local'}}"
   primary_host="${primary_registry%%/*}"
   [[ -n "$fallback_registry" ]]        && fallback_host="${fallback_registry%%/*}"        || fallback_host=""
   [[ -n "$default_offline_registry" ]] && default_host="${default_offline_registry%%/*}"  || default_host=""
