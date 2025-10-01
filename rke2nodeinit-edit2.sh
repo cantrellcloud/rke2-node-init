@@ -373,10 +373,10 @@ ensure_yaml_has_metadata_name() {
 
 sanitize_yaml() {
   sed -E \
-    -e 's/(registryPassword:[[:space:]]*)"[^"]*"/\1"********"/' \
-    -e 's/(registryPassword:[[:space:]]*)([^"[:space:]].*)/\1"********"/' \
-    -e 's/(token:[[:space:]]*)"[^"]*"/\1"********"/' \
-    -e 's/(token:[[:space:]]*)([^"[:space:]].*)/\1"********"/' \
+    -e 's/(registryPassword:[[ :space: ]]*)"[^"]*"/\1"********"/' \
+    -e 's/(registryPassword:[[ :space: ]]*)([^"[:space:]].*)/\1"********"/' \
+    -e 's/(token:[[ :space: ]]*)"[^"]*"/\1"********"/' \
+    -e 's/(token:[[ :space: ]]*)([^"[:space:]].*)/\1"********"/' \
     "$1"
 }
 
