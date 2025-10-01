@@ -1537,12 +1537,19 @@ action_server() {
 
   setup_custom_cluster_ca || true
 
+  log INFO "Writing file: /etc/rancher/rke2/config.yaml..."
   mkdir -p /etc/rancher/rke2
   : > /etc/rancher/rke2/config.yaml
   {
     echo "cluster-init: ${CLUSTER_INIT:-true}"
+
+    # Optional but recommended: stable join secret for future nodes
+    if [[ -n "$TOKEN" ]]; then
+      echo "token: $TOKEN"
+    fi
+
     echo "node-ip: \"$IP\""
-    emit_tls_sans "$TLS_SANS"
+  #  emit_tls_sans "$TLS_SANS"
 
     # Kubelet defaults (safe; additive). Merge-friendly if you later append more.
     echo "kubelet-arg:"
@@ -1554,15 +1561,11 @@ action_server() {
     echo "  - container-log-max-files=5"
     echo "  - protect-kernel-defaults=true"
 
-    # Optional but recommended: stable join secret for future nodes
-    if [[ -n "$TOKEN" ]]; then
-      echo "token: $TOKEN"
-    fi
-
     echo "write-kubeconfig-mode: \"0640\""
     # Leave system-default-registry unset to preserve cached naming.
   } >> /etc/rancher/rke2/config.yaml
   
+  log INFO "Setting file security: /etc/rancher/rke2/config.yaml..."
   chmod 600 /etc/rancher/rke2/config.yaml
   
   log INFO "Append additional keys from YAML spec (cluster-cidr, domain, cni, etc.)..."
