@@ -1628,7 +1628,7 @@ fi
 
 case "${ACTION:-}" in
   image)       action_image  ;;
-  server)      action_add_server ;;
+  server)      action_server ;;
   agent)       action_agent  ;;
   verify)      action_verify ;;
   add_server) action_add_server ;;
