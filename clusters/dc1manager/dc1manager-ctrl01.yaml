@@ -10,20 +10,14 @@ spec:
   dns: ["10.0.1.34", "10.231.1.34"]
   searchDomains: ["dev.kube", "dev.local"]
 
-#  write-kubeconfig-mode: "0640"
   tls-san:
     - j64manager-ctrl01
     - j64manager-cluster
     - j64manager-cluster.dev.kube
     - 10.0.4.131
- # node-taint:
- # - "node-role.kubernetes.io/control-plane:NoSchedule
- # node-label:
- # - "env=preprod"
   service-cidr: 10.90.0.0/16
   cluster-cidr: 10.240.0.0/16
   cluster-domain: cluster.local
- # cni: canal
   enable-servicelb: "false"
   system-default-registry: altregistry.dev.kube
   private-registry: /etc/rancher/rke2/registries.yaml
@@ -33,6 +27,4 @@ spec:
   customCA:
     rootCrt: /certs/dev-certa001-ca-dev-local.crt
     rootKey: /certs/dev-certa001-ca-dev-local-key.pem
-    # intermediateCrt: /certs/intermediate.crt
-    # intermediateKey: /certs/intermediate.key
     installToOSTrust: true
