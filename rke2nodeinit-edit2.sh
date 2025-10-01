@@ -1477,7 +1477,10 @@ action_image() {
 # Action: SERVER (bootstrap a brand-new control plane)
 # Uses cached artifacts from action_image() and writes /etc/rancher/rke2/config.yaml
 action_server() {
+  log INFO "Ensure YAML has metadata.name..."
   if [[ -n "$CONFIG_FILE" ]]; then ensure_yaml_has_metadata_name "$CONFIG_FILE"; fi
+
+  log INFO "Loading site defaults..."
   load_site_defaults
 
   local IP="" PREFIX="" HOSTNAME="" DNS="" SEARCH="" GW=""
@@ -1493,7 +1496,7 @@ action_server() {
     sd="$(yaml_spec_get "$CONFIG_FILE" searchDomains || true)"; [[ -n "$sd" ]] && SEARCH="$(normalize_list_csv "$sd")"
     ts="$(yaml_spec_get_any "$CONFIG_FILE" tlsSans tls-san || true)"; [[ -z "$ts" ]] && ts="$(yaml_spec_list_csv "$CONFIG_FILE" tls-san || true)"; [[ -n "$ts" ]] && TLS_SANS_IN="$(normalize_list_csv "$ts")"
     TOKEN="$(yaml_spec_get "$CONFIG_FILE" token || true)"
-    CLUSTER_INIT="$(yaml_spec_get "$CONFIG_FILE" clusterInit || echo true)"
+    #CLUSTER_INIT="$(yaml_spec_get "$CONFIG_FILE" clusterInit || echo true)"
   fi
 
   # Fill missing basics
@@ -1508,6 +1511,7 @@ action_server() {
   fi
   [[ -z "$SEARCH" && -n "${DEFAULT_SEARCH:-}" ]] && SEARCH="$DEFAULT_SEARCH"
 
+  log INFO "Validating configuration..."
   # Validate
   while ! valid_ipv4 "$IP"; do read -rp "Invalid IPv4. Re-enter server IP: " IP; done
   while ! valid_prefix "${PREFIX:-}"; do read -rp "Invalid prefix (0-32). Re-enter [default 24]: " PREFIX; done
@@ -1524,9 +1528,10 @@ action_server() {
   #  log INFO "Auto-derived TLS SANs: $TLS_SANS"
   #fi
 
+  log INFO "Ensuring staged artifacts for offline RKE2 server install..."
   ensure_staged_artifacts
-  #install_rke2_prereqs
 
+  log INFO "Setting new hostname: $HOSTNAME..."
   hostnamectl set-hostname "$HOSTNAME"
   if ! grep -qE "[[:space:]]$HOSTNAME(\$|[[:space:]])" /etc/hosts; then echo "$IP $HOSTNAME" >> /etc/hosts; fi
   write_netplan "$IP" "$PREFIX" "${GW:-}" "${DNS:-}" "${SEARCH:-}"
@@ -1536,14 +1541,14 @@ action_server() {
   {
     #echo "cluster-init: ${CLUSTER_INIT}"
     echo "node-ip: \"$IP\""
-    emit_tls_sans "$TLS_SANS"
+   # emit_tls_sans "$TLS_SANS"
 
     # Kubelet defaults (safe; additive). Merge-friendly if you later append more.
     echo "kubelet-arg:"
-    # Prefer systemd-resolved if present
-    if [[ -f /run/systemd/resolve/resolv.conf ]]; then
-      echo "  - resolv-conf=/run/systemd/resolve/resolv.conf"
-    fi
+  #  # Prefer systemd-resolved if present
+  #  if [[ -f /run/systemd/resolve/resolv.conf ]]; then
+  #    echo "  - resolv-conf=/run/systemd/resolve/resolv.conf"
+  #  fi
     echo "  - container-log-max-size=10Mi"
     echo "  - container-log-max-files=5"
     echo "  - protect-kernel-defaults=true"
@@ -1559,7 +1564,8 @@ action_server() {
   chmod 600 /etc/rancher/rke2/config.yaml
   # Append additional keys from YAML spec (cluster-cidr, domain, cni, etc.)
   append_spec_config_extras "$CONFIG_FILE"
-  log INFO "Wrote /etc/rancher/rke2/config.yaml (cluster-init=${CLUSTER_INIT})"
+ # log INFO "Wrote /etc/rancher/rke2/config.yaml (cluster-init=${CLUSTER_INIT})"
+  log INFO "Wrote /etc/rancher/rke2/config.yaml"
 
   setup_custom_cluster_ca || true
 
