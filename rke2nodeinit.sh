@@ -311,14 +311,9 @@ append_spec_config_extras() {
     _cfg_has_key "$k" && continue
     v="$(yaml_spec_get_any "$file" "$k" "$(echo "$k" | sed -E 's/-([a-z])/\U\\1/g; s/^([a-z])/\U\\1/; s/-//g')")" || true
     if [[ -n "$v" ]]; then
-      # ensure quoting for non-boolean, non-numeric values
-      if [[ "$v" =~ ^(true|false|[0-9]+)$ ]]; then
-        echo "$k: $v" >> "$cfg"
-      else
-        # strip surrounding quotes then re-quote
-        v="${v%\"}"; v="${v#\"}"; v="${v%\'}"; v="${v#\'}"
-        echo "$k: \"$v\"" >> "$cfg"
-      fi
+      local normalized=""
+      normalized="$(normalize_bool_value "$v")"
+      echo "$k: $normalized" >> "$cfg"
     fi
   done
 
@@ -388,6 +383,32 @@ normalize_list_csv() {
   v="${v#[}"; v="${v%]}"
   v="${v//\"/}"; v="${v//\'/}"
   echo "$v" | sed 's/,/ /g' | xargs | sed 's/ /, /g'
+}
+
+normalize_bool_value() {
+  local raw="${1:-}"
+  # shellcheck disable=SC2001
+  local v
+  v="$(echo "$raw" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+
+  if [[ ${#v} -ge 2 ]]; then
+    if [[ ${v:0:1} == '"' && ${v: -1} == '"' ]]; then
+      v="${v:1:-1}"
+    elif [[ ${v:0:1} == "'" && ${v: -1} == "'" ]]; then
+      v="${v:1:-1}"
+    fi
+  fi
+
+  local lowered="${v,,}"
+  if [[ -z "$lowered" ]]; then
+    echo '""'
+  elif [[ "$lowered" =~ ^(true|false)$ ]]; then
+    echo "$lowered"
+  elif [[ "$lowered" =~ ^[0-9]+$ ]]; then
+    echo "$lowered"
+  else
+    printf '"%s"\n' "$lowered"
+  fi
 }
 
 # ---------- Validators --------------------------------------------------------------------------
@@ -1591,9 +1612,12 @@ action_server() {
   log INFO "Writing file: /etc/rancher/rke2/config.yaml..."
   mkdir -p /etc/rancher/rke2
   : > /etc/rancher/rke2/config.yaml
+  local cluster_init_value
+  cluster_init_value="$(normalize_bool_value "${CLUSTER_INIT:-true}")"
+
   {
     echo "debug: true"
-    echo "cluster-init: ${CLUSTER_INIT:-true}"
+    echo "cluster-init: $cluster_init_value"
 
     # Optional but recommended: stable join secret for future nodes
     if [[ -n "$TOKEN" ]]; then
