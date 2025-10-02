@@ -28,6 +28,6 @@ spec:
     - "audit-log-maxage=15"
 
   customCA:
-    rootCrt: /certs/dev-certa001-ca-dev-local.crt
-    rootKey: /certs/dev-certa001-ca-dev-local-key.pem
+    rootCrt: certs/dev-certa001-ca-dev-local.crt
+    rootKey: certs/dev-certa001-ca-dev-local-key.pem
     installToOSTrust: true
