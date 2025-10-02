@@ -449,7 +449,7 @@ EOF
 purge_old_netplan() {
   # back up and remove all existing netplan YAMLs to avoid merged old configs
   local bdir
-  bdir=$("/etc/netplan/.backup-$(date -u +%Y%m%dT%H%M%SZ)")
+  bdir="/etc/netplan/.backup-$(date -u +%Y%m%dT%H%M%SZ)"
   mkdir -p "$bdir"
   shopt -s nullglob
   local moved=0
