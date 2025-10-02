@@ -18,6 +18,9 @@ esac
 
 # ----------------------------------------------------
 # rke2nodeinit.sh
+#       Written by: Ron Cantrell
+#           Github: cantrellr
+#            Email: charlescantrelljr@outlook.com
 # ----------------------------------------------------
 # Purpose:
 #   Prepare and configure a Linux VM/host (Ubuntu/Debian-based) for an offline/air-gapped
