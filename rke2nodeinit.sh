@@ -304,6 +304,12 @@ append_spec_config_extras() {
     "cni" "system-default-registry" "private-registry" "write-kubeconfig-mode"
     "selinux" "protect-kernel-defaults" "kube-apiserver-image" "kube-controller-manager-image"
     "kube-scheduler-image" "etcd-image" "disable-cloud-controller" "disable-kube-proxy"
+    "enable-servicelb"
+  )
+
+  local -a boolean_scalars=(
+    "selinux" "protect-kernel-defaults" "disable-cloud-controller" "disable-kube-proxy"
+    "enable-servicelb"
   )
 
   local k v
@@ -311,13 +317,35 @@ append_spec_config_extras() {
     _cfg_has_key "$k" && continue
     v="$(yaml_spec_get_any "$file" "$k" "$(echo "$k" | sed -E 's/-([a-z])/\U\\1/g; s/^([a-z])/\U\\1/; s/-//g')")" || true
     if [[ -n "$v" ]]; then
-      # ensure quoting for non-boolean, non-numeric values
-      if [[ "$v" =~ ^(true|false|[0-9]+)$ ]]; then
-        echo "$k: $v" >> "$cfg"
+      local is_bool=0
+      local b
+      for b in "${boolean_scalars[@]}"; do
+        if [[ "$k" == "$b" ]]; then
+          is_bool=1
+          break
+        fi
+      done
+
+      # strip surrounding quotes early for reuse
+      local trimmed="$v"
+      trimmed="${trimmed%\"}"; trimmed="${trimmed#\"}"
+      trimmed="${trimmed%\'}"; trimmed="${trimmed#\'}"
+
+      if (( is_bool )); then
+        local lower
+        lower="$(printf '%s' "$trimmed" | tr '[:upper:]' '[:lower:]')"
+        case "$lower" in
+          true|1|yes)  echo "$k: true" >> "$cfg" ;;
+          false|0|no) echo "$k: false" >> "$cfg" ;;
+          *)
+            # fall back to quoting if the value is unexpected
+            echo "$k: \"$trimmed\"" >> "$cfg"
+            ;;
+        esac
+      elif [[ "$trimmed" =~ ^(true|false|[0-9]+)$ ]]; then
+        echo "$k: $trimmed" >> "$cfg"
       else
-        # strip surrounding quotes then re-quote
-        v="${v%\"}"; v="${v#\"}"; v="${v%\'}"; v="${v#\'}"
-        echo "$k: \"$v\"" >> "$cfg"
+        echo "$k: \"$trimmed\"" >> "$cfg"
       fi
     fi
   done
