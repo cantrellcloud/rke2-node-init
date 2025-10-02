@@ -896,7 +896,7 @@ setup_custom_cluster_ca() {
   if [[ -f "$ROOT_CRT" ]]; then
     if [[ "${CUSTOM_CA_INSTALL_TO_OS_TRUST:-1}" -ne 0 ]]; then
       mkdir -p /usr/local/share/ca-certificates
-      bn="$(basename "$ROOT_CRT")"
+      _bn="$(basename "$ROOT_CRT")"
       if ! cmp -s "$ROOT_CRT" "/usr/local/share/ca-certificates/$_bn" 2>/dev/null; then
         cp "$ROOT_CRT" "/usr/local/share/ca-certificates/$_bn"
         update-ca-certificates >>"$LOG_FILE" 2>&1 || true
@@ -984,13 +984,13 @@ verify_custom_cluster_ca() {
     return 0
   fi
 
+  local _bn=""
   if [[ ! -f "$ROOT_CA" ]]; then
     # Fallback to OS-installed copy of the configured CA
     if [[ -n "${CUSTOM_CA_ROOT_CRT:-}" ]]; then
-      local bn=""
-      bn="$(basename "$CUSTOM_CA_ROOT_CRT")"
-      if [[ -f "/usr/local/share/ca-certificates/$bn" ]]; then
-        ROOT_CA="/usr/local/share/ca-certificates/$bn"
+      _bn="$(basename "$CUSTOM_CA_ROOT_CRT")"
+      if [[ -f "/usr/local/share/ca-certificates/$_bn" ]]; then
+        ROOT_CA="/usr/local/share/ca-certificates/$_bn"
       fi
     fi
   fi
