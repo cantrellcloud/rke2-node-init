@@ -1457,7 +1457,7 @@ action_image() {
   # README in outputs/<SPEC_NAME>
   if [[ -n "${RUN_OUT_DIR:-}" ]]; then
     {
-      echo "# Air‑Gapped Image Prep Summary"
+      echo "# Air-Gapped Image Prep Summary"
       echo "Name: ${SPEC_NAME}"
       echo "Timestamp (UTC): $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
       echo "RKE2_VERSION: ${RKE2_VERSION}"
