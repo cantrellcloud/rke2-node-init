@@ -565,8 +565,17 @@ write_netplan() {
 
   # Detect primary NIC
   local nic
+  local nic_path nic_candidate
   nic="$(ip -o -4 route show to default | awk '{print $5}' || true)"
-  [[ -z "$nic" ]] && nic="$(ls /sys/class/net | grep -Ev '^(lo|docker|cni|flannel|kube|veth|virbr|br-)' | head -n1)"
+  if [[ -z "$nic" ]]; then
+    for nic_path in /sys/class/net/*; do
+      nic_candidate="${nic_path##*/}"
+      if [[ ! $nic_candidate =~ ^(lo|docker|cni|flannel|kube|veth|virbr|br-) ]]; then
+        nic="$nic_candidate"
+        break
+      fi
+    done
+  fi
   [[ -z "$nic" ]] && { log ERROR "Failed to detect a primary network interface"; exit 2; }
 
   export NETPLAN_LAST_NIC="$nic"
