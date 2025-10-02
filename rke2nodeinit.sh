@@ -1717,7 +1717,7 @@ action_server() {
   load_site_defaults
 
   local IP="" PREFIX="" HOSTNAME="" DNS="" SEARCH="" GW=""
-  local TLS_SANS_IN="" TLS_SANS="" CLUSTER_INIT="true" TOKEN=""
+  local TLS_SANS_IN="" TLS_SANS=" "TOKEN="" #CLUSTER_INIT="true"
 
   if [[ -n "$CONFIG_FILE" ]]; then
     IP="$(yaml_spec_get "$CONFIG_FILE" ip || true)"
@@ -1729,7 +1729,7 @@ action_server() {
     sd="$(yaml_spec_get "$CONFIG_FILE" searchDomains || true)"; [[ -n "$sd" ]] && SEARCH="$(normalize_list_csv "$sd")"
     ts="$(yaml_spec_get_any "$CONFIG_FILE" tlsSans tls-san || true)"; [[ -z "$ts" ]] && ts="$(yaml_spec_list_csv "$CONFIG_FILE" tls-san || true)"; [[ -n "$ts" ]] && TLS_SANS_IN="$(normalize_list_csv "$ts")"
     TOKEN="$(yaml_spec_get "$CONFIG_FILE" token || true)"
-    CLUSTER_INIT="$(yaml_spec_get "$CONFIG_FILE" clusterInit || echo true)"
+   # CLUSTER_INIT="$(yaml_spec_get "$CONFIG_FILE" clusterInit || echo true)"
     load_custom_ca_from_config "$CONFIG_FILE"
   fi
 
@@ -1773,8 +1773,8 @@ action_server() {
 
   log INFO "Writing file: /etc/rancher/rke2/config.yaml..."
   mkdir -p /etc/rancher/rke2
-  local cluster_init_value
-  cluster_init_value="$(normalize_bool_value "${CLUSTER_INIT:-true}")"
+ # local cluster_init_value
+ # cluster_init_value="$(normalize_bool_value "${CLUSTER_INIT:-true}")"
 
   : > /etc/rancher/rke2/config.yaml
   {
