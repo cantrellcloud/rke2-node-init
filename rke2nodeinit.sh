@@ -280,8 +280,6 @@ PY
   ' "$file"
 }
 
-
-
 # --- YAML helpers (robust under 'spec:' for scalars and lists) ---
 yaml_spec_get_any() {
   # Usage: yaml_spec_get_any <file> <key1> [key2] [key3] ...
