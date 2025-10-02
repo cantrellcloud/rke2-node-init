@@ -312,6 +312,30 @@ spec:
 
 ---
 
+### RKE2 `config.yaml` passthrough keys
+
+When `server` or `agent` runs with a YAML spec, selected `spec:` keys are
+propagated into `/etc/rancher/rke2/config.yaml` (if they are not already
+present). Supported entries include:
+
+* **Scalar keys:** `cluster-cidr`, `service-cidr`, `cluster-dns`,
+  `cluster-domain`, `cni`, `system-default-registry`, `private-registry`,
+  `write-kubeconfig-mode`, `selinux`, `protect-kernel-defaults`,
+  `kube-apiserver-image`, `kube-controller-manager-image`,
+  `kube-scheduler-image`, `etcd-image`, `disable-cloud-controller`,
+  `disable-kube-proxy`, and `enable-servicelb`.
+  * Boolean values such as `enable-servicelb` are normalized to `true` / `false`
+    even if quoted in the YAML spec.
+* **List keys:** `kube-apiserver-arg`, `kube-controller-manager-arg`,
+  `kube-scheduler-arg`, `kube-proxy-arg`, `node-taint`, `node-label`, and
+  `tls-san`.
+
+This allows cluster-specific tunables (service CIDRs, control-plane image
+overrides, SANs, etc.) to live alongside the host metadata in a single spec
+file.
+
+---
+
 ## Networking & Netplan Behavior
 
 When writing netplan the script:
