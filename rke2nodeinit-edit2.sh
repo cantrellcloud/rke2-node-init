@@ -1420,7 +1420,7 @@ action_image() {
 
   # --- OS prereqs ------------------------------------------------------------
   install_rke2_prereqs
-  install_nerdctl
+ # install_nerdctl
   fetch_rke2_ca_generator
   cache_rke2_artifacts
   ca_trust_registries
