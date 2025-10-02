@@ -85,6 +85,16 @@ AUTO_YES=0                  # -y auto-confirm reboots *and* Docker removal if de
 PRINT_CONFIG=0              # -P print sanitized YAML
 DRY_PUSH=0                  # --dry-push skips actual registry push
 
+# Custom CA context (populated from site defaults or YAML when provided)
+CUSTOM_CA_ROOT_CRT=""
+CUSTOM_CA_ROOT_KEY=""
+CUSTOM_CA_INT_CRT=""
+CUSTOM_CA_INT_KEY=""
+CUSTOM_CA_INSTALL_TO_OS_TRUST=1
+
+# Track the CA file used when deriving full tokens so runs can archive it.
+AGENT_CA_CERT=""
+
 # Artifacts
 IMAGES_TAR="rke2-images.linux-$ARCH.tar.zst"
 RKE2_TARBALL="rke2.linux-$ARCH.tar.gz"
@@ -898,6 +908,157 @@ load_custom_ca_from_config() {
         ;;
     esac
   fi
+}
+
+is_cert_trusted_by_system_store() {
+  # Best-effort detection that a certificate is trusted by the host's certificate store.
+  # Works for both custom cluster roots and generated server-ca certificates that chain to it.
+  local cert="$1"
+  [[ -n "$cert" && -f "$cert" ]] || return 1
+
+  # Fast-path: let OpenSSL validate against the default CA path.
+  if openssl verify -CApath /etc/ssl/certs "$cert" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  # Try a few common CA bundle files.
+  local bundle
+  for bundle in /etc/ssl/certs/ca-certificates.crt \
+                /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem \
+                /etc/ssl/cert.pem; do
+    if [[ -f "$bundle" ]] && openssl verify -CAfile "$bundle" "$cert" >/dev/null 2>&1; then
+      return 0
+    fi
+  done
+
+  # If the certificate was explicitly installed via update-ca-certificates, a byte-for-byte copy
+  # should exist in /usr/local/share/ca-certificates/.
+  local bn
+  bn="$(basename "$cert")"
+  if [[ -f "/usr/local/share/ca-certificates/$bn" ]]; then
+    if cmp -s "$cert" "/usr/local/share/ca-certificates/$bn" 2>/dev/null; then
+      return 0
+    fi
+  fi
+
+  # Certificates that already live inside /etc/ssl/certs are also considered trusted.
+  case "$cert" in
+    /etc/ssl/certs/*) return 0;;
+  esac
+
+  # Finally, scan the hashed store for an identical file (nullglob avoids literal patterns).
+  local candidate
+  shopt -s nullglob
+  for candidate in /etc/ssl/certs/*.pem /etc/ssl/certs/*.crt; do
+    if [[ -f "$candidate" ]] && cmp -s "$cert" "$candidate" 2>/dev/null; then
+      shopt -u nullglob
+      return 0
+    fi
+  done
+  shopt -u nullglob
+
+  return 1
+}
+
+find_trusted_cluster_ca_certificate() {
+  # Locate a CA certificate suitable for deriving the full cluster token. Preference order:
+  #  1) Generated server-ca from an initialized server node
+  #  2) Any custom root/intermediate explicitly provided
+  #  3) Copies that were installed into the OS trust store
+  local candidates=(
+    "/var/lib/rancher/rke2/server/tls/server-ca.crt"
+    "/etc/rancher/rke2/server/tls/server-ca.crt"
+    "${CUSTOM_CA_ROOT_CRT:-}"
+    "${CUSTOM_CA_INT_CRT:-}"
+  )
+
+  if [[ -n "${CUSTOM_CA_ROOT_CRT:-}" ]]; then
+    local bn
+    bn="$(basename "${CUSTOM_CA_ROOT_CRT}")"
+    candidates+=("/usr/local/share/ca-certificates/$bn" "/etc/ssl/certs/$bn")
+  fi
+
+  local candidate
+  for candidate in "${candidates[@]}"; do
+    [[ -n "$candidate" && -f "$candidate" ]] || continue
+    if is_cert_trusted_by_system_store "$candidate"; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done
+
+  # As a last resort, try to match the fingerprint of the provided root within the trust store.
+  if [[ -n "${CUSTOM_CA_ROOT_CRT:-}" && -f "${CUSTOM_CA_ROOT_CRT}" ]]; then
+    local root_fp=""
+    root_fp="$(openssl x509 -noout -fingerprint -sha256 -in "${CUSTOM_CA_ROOT_CRT}" 2>/dev/null | awk -F= '{print $2}' | tr -d :)"
+    if [[ -n "$root_fp" ]]; then
+      shopt -s nullglob
+      for candidate in /etc/ssl/certs/*; do
+        [[ -f "$candidate" ]] || continue
+        local cand_fp=""
+        cand_fp="$(openssl x509 -noout -fingerprint -sha256 -in "$candidate" 2>/dev/null | awk -F= '{print $2}' | tr -d :)"
+        if [[ -n "$cand_fp" && "$cand_fp" == "$root_fp" ]]; then
+          shopt -u nullglob
+          printf '%s' "$candidate"
+          return 0
+        fi
+      done
+      shopt -u nullglob
+    fi
+  fi
+
+  return 1
+}
+
+ensure_full_cluster_token() {
+  # Convert a short join token (e.g. server:xxxxxxxx) into the "full" token format required
+  # when custom CAs are in use: K10<cluster-ca-hash>::<credentials-or-password>.
+  local raw_token="$1"
+  if [[ -z "$raw_token" ]]; then
+    printf '%s' "$raw_token"
+    return 0
+  fi
+
+  # Trim CR/LF without altering other characters.
+  local trimmed
+  trimmed="$(printf '%s' "$raw_token" | tr -d '\r\n')"
+
+  # Already a full token? Nothing to do.
+  if [[ "$trimmed" =~ ^K10[0-9a-fA-F]{64}:: ]]; then
+    printf '%s' "$trimmed"
+    return 0
+  fi
+
+  # Only attempt to expand when a custom CA context is available.
+  if [[ -z "${CUSTOM_CA_ROOT_CRT:-}" && -z "${CUSTOM_CA_INT_CRT:-}" ]]; then
+    printf '%s' "$trimmed"
+    return 0
+  fi
+
+  local ca_cert=""
+  if ! ca_cert="$(find_trusted_cluster_ca_certificate)"; then
+    log WARN "customCA configured but no trusted CA certificate could be located; leaving token unchanged."
+    printf '%s' "$trimmed"
+    return 0
+  fi
+
+  if ! is_cert_trusted_by_system_store "$ca_cert"; then
+    log WARN "customCA configured but $ca_cert is not trusted by the system store; leaving token unchanged."
+    printf '%s' "$trimmed"
+    return 0
+  fi
+
+  local ca_hash=""
+  ca_hash="$(openssl x509 -outform der -in "$ca_cert" 2>/dev/null | sha256sum 2>/dev/null | awk '{print $1}')"
+  if [[ -z "$ca_hash" ]]; then
+    log WARN "Failed to compute custom CA hash from $ca_cert; leaving token unchanged."
+    printf '%s' "$trimmed"
+    return 0
+  fi
+
+  AGENT_CA_CERT="$ca_cert"
+  log INFO "Derived full cluster token using CA hash $ca_hash from $ca_cert."
+  printf 'K10%s::%s' "$ca_hash" "$trimmed"
 }
 
 run_rke2_installer() {
@@ -1771,6 +1932,17 @@ action_server() {
 
   setup_custom_cluster_ca || true
 
+  if [[ -n "$TOKEN" ]]; then
+    local full_token
+    full_token="$(ensure_full_cluster_token "$TOKEN")"
+    if [[ -n "$full_token" ]]; then
+      if [[ "$full_token" != "$TOKEN" ]]; then
+        log INFO "Expanded provided token to full format (custom CA hash included)."
+      fi
+      TOKEN="$full_token"
+    fi
+  fi
+
   log INFO "Writing file: /etc/rancher/rke2/config.yaml..."
   mkdir -p /etc/rancher/rke2
  # local cluster_init_value
@@ -1843,6 +2015,8 @@ action_agent() {
 
   load_site_defaults
 
+  AGENT_CA_CERT=""
+
   local IP="" PREFIX="" HOSTNAME="" DNS="" SEARCH="" GW=""
   local URL="" TOKEN=""
 
@@ -1856,6 +2030,7 @@ action_agent() {
     GW="$(yaml_spec_get "$CONFIG_FILE" gateway || true)"
     URL="$(yaml_spec_get_any "$CONFIG_FILE" serverURL server url || true)"
     TOKEN="$(yaml_spec_get "$CONFIG_FILE" token || true)"
+    load_custom_ca_from_config "$CONFIG_FILE"
   fi
 
   if [[ -z "$IP" ]];      then read -rp "Enter static IPv4 for this agent node: " IP; fi
@@ -1887,6 +2062,17 @@ action_agent() {
   while ! valid_csv_dns "${DNS:-}"; do read -rp "Invalid DNS list. Re-enter CSV IPv4s: " DNS; done
   while ! valid_search_domains_csv "${SEARCH:-}"; do read -rp "Invalid search domain list. Re-enter CSV: " SEARCH; done
   [[ -z "${PREFIX:-}" ]] && PREFIX=24
+
+  if [[ -n "$TOKEN" ]]; then
+    local full_token=""
+    full_token="$(ensure_full_cluster_token "$TOKEN")"
+    if [[ -n "$full_token" ]]; then
+      if [[ "$full_token" != "$TOKEN" ]]; then
+        log INFO "Expanded agent join token to full format (custom CA hash included)."
+      fi
+      TOKEN="$full_token"
+    fi
+  fi
 
   log INFO "Ensuring staged artifacts for offline RKE2 agent install..."
   ensure_staged_artifacts
@@ -1984,6 +2170,17 @@ action_add_server() {
   [[ -z "${PREFIX:-}" ]] && PREFIX=24
 
   ensure_staged_artifacts
+
+  if [[ -n "$TOKEN" ]]; then
+    local full_token=""
+    full_token="$(ensure_full_cluster_token "$TOKEN")"
+    if [[ -n "$full_token" ]]; then
+      if [[ "$full_token" != "$TOKEN" ]]; then
+        log INFO "Expanded server join token to full format (custom CA hash included)."
+      fi
+      TOKEN="$full_token"
+    fi
+  fi
 
   # Derive TLS SANs if not provided
   local TLS_SANS_IN TLS_SANS
