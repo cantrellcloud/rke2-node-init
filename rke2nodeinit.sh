@@ -892,10 +892,10 @@ setup_custom_cluster_ca() {
   local GEN2="$DOWNLOADS_DIR/generate-custom-ca-certs.sh"
 
   # Optionally ensure OS trust (clients/servers on the host trust the root CA)
+  local _bn=""
   if [[ -f "$ROOT_CRT" ]]; then
     if [[ "${CUSTOM_CA_INSTALL_TO_OS_TRUST:-1}" -ne 0 ]]; then
       mkdir -p /usr/local/share/ca-certificates
-      local _bn=""
       bn="$(basename "$ROOT_CRT")"
       if ! cmp -s "$ROOT_CRT" "/usr/local/share/ca-certificates/$_bn" 2>/dev/null; then
         cp "$ROOT_CRT" "/usr/local/share/ca-certificates/$_bn"
