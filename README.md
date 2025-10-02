@@ -371,6 +371,20 @@ ip route
 cat /etc/netplan/99-rke-static.yaml
 ```
 
+### Manual regression: nested YAML keys
+
+When your site definition includes nested values under `spec:` (for example `customCA.rootCrt`), run the desired action with the
+same YAML file and confirm that the referenced artifacts show up in both locations:
+
+```bash
+sudo ./rke2nodeinit.sh -f clusters/dc1manager/dc1manager-ctrl01.yaml server
+ls -l /var/lib/rancher/rke2/server/tls/root-ca.pem
+ls -l /usr/local/share/ca-certificates/
+```
+
+The helper that parses `spec.customCA.*` tracks indentation, so the certificates copied into `/var/lib/rancher/rke2/server/tls/`
+and the OS trust store should match the values defined in the YAML.
+
 ---
 
 ## Troubleshooting

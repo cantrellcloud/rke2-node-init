@@ -205,16 +205,75 @@ yaml_get_kind() { grep -E '^[[:space:]]*kind:[[:space:]]*'       "$1" | awk -F: 
 
 yaml_spec_get() {
   local file="$1" key="$2"
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$file" "$key" <<'PY'
+import re
+import sys
+
+file_path, key_path = sys.argv[1:3]
+parts = key_path.split('.')
+target_depth = len(parts)
+
+try:
+    with open(file_path, encoding='utf-8') as fh:
+        in_spec = False
+        stack = []
+        indent_stack = []
+        for raw_line in fh:
+            line = raw_line.rstrip('\n')
+            if not in_spec:
+                if re.match(r'^\s*spec:\s*$', line):
+                    in_spec = True
+                continue
+
+            if not line.strip() or line.lstrip().startswith('#'):
+                continue
+
+            indent = len(line) - len(line.lstrip(' '))
+            if indent < 1:
+                break
+
+            while indent_stack and indent <= indent_stack[-1]:
+                stack.pop()
+                indent_stack.pop()
+
+            match = re.match(r'^\s*([^:#]+):\s*(.*)$', line)
+            if not match:
+                continue
+
+            stack.append(match.group(1).strip())
+            indent_stack.append(indent)
+
+            if stack[:len(parts)] != parts[:len(stack)]:
+                continue
+
+            value = match.group(2).strip()
+            if len(stack) == target_depth and value:
+                value = re.sub(r'\s+#.*$', '', value).strip()
+                if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+                    value = value[1:-1]
+                print(value)
+                sys.exit(0)
+except FileNotFoundError:
+    pass
+
+sys.exit(1)
+PY
+    return
+  fi
+
   awk -v k="$key" '
     BEGIN { inSpec=0 }
     /^[[:space:]]*spec:[[:space:]]*$/ { inSpec=1; next }
     inSpec==1 {
       if ($0 ~ /^[^[:space:]]/) { exit }
       if ($0 ~ "^[[:space:]]+" k "[[:space:]]*:") {
-        sub(/^[[:space:]]+/, "", $0)
-        sub(k "[[:space:]]*:[[:space:]]*", "", $0)
-        gsub(/^[[:space:]]+|[[:space:]]+$/, "", $0)
-        print $0
+        line=$0
+        sub(/^[[:space:]]+/, "", line)
+        sub(k "[[:space:]]*:[[:space:]]*", "", line)
+        sub(/[[:space:]]+#.*$/, "", line)
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+        print line
         exit
       }
     }
@@ -719,6 +778,60 @@ gen_sbom_or_metadata() {
   else
     gen_inspect_json "$img" > "$SBOM_DIR/${base}.inspect.json"
     log INFO "Inspect metadata written: $SBOM_DIR/${base}.inspect.json"
+  fi
+}
+
+load_custom_ca_from_config() {
+  local file="$1"
+  [[ -n "$file" ]] || return 0
+
+  local root="" key="" intcrt="" intkey="" install=""
+  root="$(yaml_spec_get "$file" customCA.rootCrt || true)"
+  key="$(yaml_spec_get "$file" customCA.rootKey || true)"
+  intcrt="$(yaml_spec_get "$file" customCA.intermediateCrt || true)"
+  intkey="$(yaml_spec_get "$file" customCA.intermediateKey || true)"
+  install="$(yaml_spec_get "$file" customCA.installToOSTrust || true)"
+
+  if [[ -n "$root" ]]; then
+    if [[ "${root:0:1}" != "/" ]]; then
+      root="$SCRIPT_DIR/$root"
+    fi
+    CUSTOM_CA_ROOT_CRT="$root"
+  fi
+
+  if [[ -n "$key" ]]; then
+    if [[ "${key:0:1}" != "/" ]]; then
+      key="$SCRIPT_DIR/$key"
+    fi
+    CUSTOM_CA_ROOT_KEY="$key"
+  fi
+
+  if [[ -n "$intcrt" ]]; then
+    if [[ "${intcrt:0:1}" != "/" ]]; then
+      intcrt="$SCRIPT_DIR/$intcrt"
+    fi
+    CUSTOM_CA_INT_CRT="$intcrt"
+  fi
+
+  if [[ -n "$intkey" ]]; then
+    if [[ "${intkey:0:1}" != "/" ]]; then
+      intkey="$SCRIPT_DIR/$intkey"
+    fi
+    CUSTOM_CA_INT_KEY="$intkey"
+  fi
+
+  if [[ -n "$install" ]]; then
+    case "$install" in
+      [Tt]rue|1|[Yy]es)
+        CUSTOM_CA_INSTALL_TO_OS_TRUST=1
+        ;;
+      [Ff]alse|0|[Nn]o)
+        CUSTOM_CA_INSTALL_TO_OS_TRUST=0
+        ;;
+      *)
+        CUSTOM_CA_INSTALL_TO_OS_TRUST="$install"
+        ;;
+    esac
   fi
 }
 
@@ -1548,6 +1661,7 @@ action_server() {
     ts="$(yaml_spec_get_any "$CONFIG_FILE" tlsSans tls-san || true)"; [[ -z "$ts" ]] && ts="$(yaml_spec_list_csv "$CONFIG_FILE" tls-san || true)"; [[ -n "$ts" ]] && TLS_SANS_IN="$(normalize_list_csv "$ts")"
     TOKEN="$(yaml_spec_get "$CONFIG_FILE" token || true)"
     CLUSTER_INIT="$(yaml_spec_get "$CONFIG_FILE" clusterInit || echo true)"
+    load_custom_ca_from_config "$CONFIG_FILE"
   fi
 
   # Fill missing basics
@@ -1761,6 +1875,7 @@ action_add_server() {
     TOKEN="$(yaml_spec_get "$CONFIG_FILE" token || true)"
     TOKEN_FILE="$(yaml_spec_get "$CONFIG_FILE" tokenFile || true)"
     ts="$(yaml_spec_get_any "$CONFIG_FILE" tlsSans tls-san || true)"; [[ -z "$ts" ]] && ts="$(yaml_spec_list_csv "$CONFIG_FILE" tls-san || true)"; [[ -n "$ts" ]] && TLS_SANS_IN="$(normalize_list_csv "$ts")"
+    load_custom_ca_from_config "$CONFIG_FILE"
   fi
 
   [[ -z "$IP"       ]] && read -rp "Enter static IPv4 for this server node: " IP
