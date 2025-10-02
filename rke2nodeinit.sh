@@ -16,7 +16,7 @@ case "$(head -c 2 "$0" | od -An -t x1 | tr -d ' ')" in
   *0d0a) echo "ERROR: Windows line endings detected. Run: dos2unix '$0'"; exit 2;;
 esac
 
-#
+######################################################
 # rke2nodeinit.sh
 # ----------------------------------------------------
 # Purpose:
