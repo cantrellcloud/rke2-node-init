@@ -1458,7 +1458,7 @@ prompt_reboot() {
     sleep 2
     reboot
   else
-    read -r -p "Reboot now to ensure kernel modules/sysctls persist? [y/N]: " _ans
+    read -r -p "Reboot now? [y/N]: " _ans
     case "${_ans,,}" in
       y|yes)
         log WARN "Rebooting..."
