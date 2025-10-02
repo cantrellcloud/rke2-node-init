@@ -1797,7 +1797,7 @@ action_server() {
     fi
     echo "  - container-log-max-size=10Mi"
     echo "  - container-log-max-files=5"
-    echo " # - protect-kernel-defaults=true"
+   # echo "  - protect-kernel-defaults=true"
     echo "write-kubeconfig-mode: \"0640\""
 	echo "disable:"
 	echo "  - rke2-ingress-nginx"
