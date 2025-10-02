@@ -1,0 +1,22 @@
+debug: true
+cluster-init: true
+node-ip: "10.0.69.55"
+tls-san:
+  - "copine-cluster"
+  - "copine-cluster.dev.kube"
+  - "10.0.69.55"
+kubelet-arg:
+  - resolv-conf=/run/systemd/resolve/resolv.conf
+  - container-log-max-size=10Mi
+  - container-log-max-files=5
+  - protect-kernel-defaults=true
+write-kubeconfig-mode: "0640"
+cluster-cidr: "10.42.0.0/16"
+service-cidr: "10.96.0.0/12"
+cluster-domain: "cluster.local"
+cni: "canal"
+system-default-registry: "altregistry.dev.kube"
+private-registry: "/etc/rancher/rke2/registries.yaml"
+enable-servicelb: false
+kube-apiserver-arg:
+  - audit-log-maxage=15
