@@ -899,8 +899,8 @@ run_rke2_installer() {
 }
 
 setup_custom_cluster_ca() {
-  local ROOT_CRT="${CUSTOM_CA_ROOT_CRT:-$SCRIPT_DIR/certs/dev-certa001-ca-dev-local.crt}"
-  local ROOT_KEY="${CUSTOM_CA_ROOT_KEY:-$SCRIPT_DIR/certs/dev-certa001-ca-dev-local-key.pem}"
+  local ROOT_CRT="${CUSTOM_CA_ROOT_CRT:-}"
+  local ROOT_KEY="${CUSTOM_CA_ROOT_KEY:-}"
   local INT_CRT="${CUSTOM_CA_INT_CRT:-}"
   local INT_KEY="${CUSTOM_CA_INT_KEY:-}"
   local TLS_DIR="/var/lib/rancher/rke2/server/tls"
