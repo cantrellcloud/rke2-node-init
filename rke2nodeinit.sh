@@ -1779,7 +1779,7 @@ action_server() {
   : > /etc/rancher/rke2/config.yaml
   {
     echo "debug: true"
-    echo "cluster-init: $cluster_init_value"
+    #echo "cluster-init: $cluster_init_value"
 
     # Optional but recommended: stable join secret for future nodes
     if [[ -n "$TOKEN" ]]; then
@@ -1797,10 +1797,12 @@ action_server() {
     fi
     echo "  - container-log-max-size=10Mi"
     echo "  - container-log-max-files=5"
-    echo "  - protect-kernel-defaults=true"
-
+    echo " # - protect-kernel-defaults=true"
     echo "write-kubeconfig-mode: \"0640\""
-    # Leave system-default-registry unset to preserve cached naming.
+	echo "disable:"
+	echo "  - rke2-ingress-nginx"
+	echo
+
   } >> /etc/rancher/rke2/config.yaml
 
   log INFO "Append additional keys from YAML spec (cluster-cidr, domain, cni, etc.)..."

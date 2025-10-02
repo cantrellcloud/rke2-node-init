@@ -23,14 +23,14 @@ spec:
   cluster-cidr: 10.42.0.0/16
   cluster-domain: cluster.local
   cni: canal
+  system-default-registry: altregistry.dev.kube
+  private-registry: /etc/rancher/rke2/registries.yaml
   enable-servicelb: false
   kube-apiserver-arg:
     - audit-log-maxage=15
   disable:
     - rke2-ingress-nginx
 
- # system-default-registry: altregistry.dev.kube
- # private-registry: /etc/rancher/rke2/registries.yaml
   # Optional: your CA handling
   customCA:
     rootCrt: certs/rke2-cert.crt
