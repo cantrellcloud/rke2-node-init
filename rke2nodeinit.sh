@@ -90,6 +90,10 @@ SHA256_FILE="sha256sum-$ARCH.txt"
 # Logging
 LOG_FILE="$LOG_DIR/rke2nodeinit_$(date -u +"%Y-%m-%dT%H-%M-%SZ").log"
 
+# Cached artifact metadata (populated at runtime)
+NERDCTL_FULL_TGZ=""
+NERDCTL_STD_TGZ=""
+
 # ---------- Help --------------------------------------------------------------------------------
 print_help() {
   cat <<'EOF'
@@ -1252,6 +1256,8 @@ install_nerdctl() {
     else
       log INFO "nerdctl standalone already cached: $(basename "$DOWNLOADS_DIR/$std_tgz")"
     fi
+    NERDCTL_FULL_TGZ="$full_tgz"
+    NERDCTL_STD_TGZ="$std_tgz"
     # Install ONLY the standalone nerdctl binary
     if [[ -f "$DOWNLOADS_DIR/$std_tgz" ]]; then
       tmpdir="$(mktemp -d)"
@@ -1274,6 +1280,14 @@ install_nerdctl() {
     fi
   else
     log WARN "Could not detect nerdctl latest release via GitHub API."
+  fi
+
+  # If detection failed (offline) but cached bundles exist, record their names.
+  if [[ -z "$NERDCTL_FULL_TGZ" && -d "$DOWNLOADS_DIR" ]]; then
+    NERDCTL_FULL_TGZ="$(find "$DOWNLOADS_DIR" -maxdepth 1 -type f -name "nerdctl-full-*-linux-${ARCH}.tar.gz" -printf '%f\n' | sort | tail -n1)"
+  fi
+  if [[ -z "$NERDCTL_STD_TGZ" && -d "$DOWNLOADS_DIR" ]]; then
+    NERDCTL_STD_TGZ="$(find "$DOWNLOADS_DIR" -maxdepth 1 -type f -name "nerdctl-*-linux-${ARCH}.tar.gz" ! -name 'nerdctl-full-*' -printf '%f\n' | sort | tail -n1)"
   fi
 }
 
@@ -1435,20 +1449,40 @@ action_image() {
   log INFO "Saved site defaults: DNS=[$defaultDnsCsv], SEARCH=[$defaultSearchCsv]"
 
   # --- SBOM and README -------------------------------------------------------
+  # Ensure nerdctl archive names are known for reporting
+  local full_tgz="${NERDCTL_FULL_TGZ:-}"
+  local std_tgz="${NERDCTL_STD_TGZ:-}"
+  if [[ -z "$full_tgz" && -d "$DOWNLOADS_DIR" ]]; then
+    full_tgz="$(find "$DOWNLOADS_DIR" -maxdepth 1 -type f -name "nerdctl-full-*-linux-${ARCH}.tar.gz" -printf '%f\n' | sort | tail -n1)"
+  fi
+  if [[ -z "$std_tgz" && -d "$DOWNLOADS_DIR" ]]; then
+    std_tgz="$(find "$DOWNLOADS_DIR" -maxdepth 1 -type f -name "nerdctl-*-linux-${ARCH}.tar.gz" ! -name 'nerdctl-full-*' -printf '%f\n' | sort | tail -n1)"
+  fi
+  NERDCTL_FULL_TGZ="$full_tgz"
+  NERDCTL_STD_TGZ="$std_tgz"
+
   # SBOM lists filenames, sizes, sha256; write to $SBOM_DIR/<name>-sbom.txt
   log INFO "Creating SBOM..."
   mkdir -p "$SBOM_DIR"
   local sbom_name="${SPEC_NAME:-image}"
   local sbom_file="$SBOM_DIR/${sbom_name}-sbom.txt"
+  local sbom_targets=(
+    "$DOWNLOADS_DIR/$IMAGES_TAR"
+    "$DOWNLOADS_DIR/$RKE2_TARBALL"
+    "$DOWNLOADS_DIR/$SHA256_FILE"
+    "$DOWNLOADS_DIR/install.sh"
+  )
+  [[ -n "$full_tgz" ]] && sbom_targets+=("$DOWNLOADS_DIR/$full_tgz")
+  [[ -n "$std_tgz"  ]] && sbom_targets+=("$DOWNLOADS_DIR/$std_tgz")
   {
     echo "# RKE2 Image Prep SBOM"
     echo "Generated: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
     echo "RKE2_VERSION: ${RKE2_VERSION}"
     echo "REGISTRY: ${REGISTRY}"
     echo
-	log INFO "Hashes and sizes of cached artifacts in $DOWNLOADS_DIR: ..."
-	echo "Hashes and sizes of cached artifacts in $DOWNLOADS_DIR:"
-    for f in "$DOWNLOADS_DIR/$IMAGES_TAR" "$DOWNLOADS_DIR/$RKE2_TARBALL" "$DOWNLOADS_DIR/$SHA256_FILE" "$DOWNLOADS_DIR/install.sh" "$DOWNLOADS_DIR/$full_tgz" "$DOWNLOADS_DIR/$std_tgz"; do
+        log INFO "Hashes and sizes of cached artifacts in $DOWNLOADS_DIR: ..."
+        echo "Hashes and sizes of cached artifacts in $DOWNLOADS_DIR:"
+    for f in "${sbom_targets[@]}"; do
       [[ -f "$f" ]] || continue
       sha256sum "$f"
       ls -l "$f" | awk '{print "SIZE " $5 "  " $9}'
