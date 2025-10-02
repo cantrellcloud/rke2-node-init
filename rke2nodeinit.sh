@@ -173,7 +173,7 @@ spinner_run() {
   # Forward signals to the child so Ctrl-C works cleanly
   trap 'kill -TERM "$pid" 2>/dev/null' TERM INT
 
-  local spin='|/-\' i=0
+  local spin='|+/-\' i=0
   while kill -0 "$pid" 2>/dev/null; do
     printf "\r[WORK] %s %s" "${spin:i++%${#spin}:1}" "$label"
     sleep 0.15
@@ -366,46 +366,14 @@ append_spec_config_extras() {
     "enable-servicelb"
   )
 
-  local -a boolean_scalars=(
-    "selinux" "protect-kernel-defaults" "disable-cloud-controller" "disable-kube-proxy"
-    "enable-servicelb"
-  )
-
   local k v
   for k in "${scalars[@]}"; do
     _cfg_has_key "$k" && continue
     v="$(yaml_spec_get_any "$file" "$k" "$(echo "$k" | sed -E 's/-([a-z])/\U\\1/g; s/^([a-z])/\U\\1/; s/-//g')")" || true
     if [[ -n "$v" ]]; then
-      local is_bool=0
-      local b
-      for b in "${boolean_scalars[@]}"; do
-        if [[ "$k" == "$b" ]]; then
-          is_bool=1
-          break
-        fi
-      done
-
-      # strip surrounding quotes early for reuse
-      local trimmed="$v"
-      trimmed="${trimmed%\"}"; trimmed="${trimmed#\"}"
-      trimmed="${trimmed%\'}"; trimmed="${trimmed#\'}"
-
-      if (( is_bool )); then
-        local lower
-        lower="$(printf '%s' "$trimmed" | tr '[:upper:]' '[:lower:]')"
-        case "$lower" in
-          true|1|yes)  echo "$k: true" >> "$cfg" ;;
-          false|0|no) echo "$k: false" >> "$cfg" ;;
-          *)
-            # fall back to quoting if the value is unexpected
-            echo "$k: \"$trimmed\"" >> "$cfg"
-            ;;
-        esac
-      elif [[ "$trimmed" =~ ^(true|false|[0-9]+)$ ]]; then
-        echo "$k: $trimmed" >> "$cfg"
-      else
-        echo "$k: \"$trimmed\"" >> "$cfg"
-      fi
+      local normalized=""
+      normalized="$(normalize_bool_value "$v")"
+      echo "$k: $normalized" >> "$cfg"
     fi
   done
 
@@ -475,6 +443,32 @@ normalize_list_csv() {
   v="${v#[}"; v="${v%]}"
   v="${v//\"/}"; v="${v//\'/}"
   echo "$v" | sed 's/,/ /g' | xargs | sed 's/ /, /g'
+}
+
+normalize_bool_value() {
+  local raw="${1:-}"
+  # shellcheck disable=SC2001
+  local v
+  v="$(echo "$raw" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+
+  if [[ ${#v} -ge 2 ]]; then
+    if [[ ${v:0:1} == '"' && ${v: -1} == '"' ]]; then
+      v="${v:1:-1}"
+    elif [[ ${v:0:1} == "'" && ${v: -1} == "'" ]]; then
+      v="${v:1:-1}"
+    fi
+  fi
+
+  local lowered="${v,,}"
+  if [[ -z "$lowered" ]]; then
+    echo '""'
+  elif [[ "$lowered" =~ ^(true|false)$ ]]; then
+    echo "$lowered"
+  elif [[ "$lowered" =~ ^[0-9]+$ ]]; then
+    echo "$lowered"
+  else
+    printf '"%s"\n' "$lowered"
+  fi
 }
 
 # ---------- Validators --------------------------------------------------------------------------
@@ -894,7 +888,8 @@ setup_custom_cluster_ca() {
   if [[ -f "$ROOT_CRT" ]]; then
     if [[ "${CUSTOM_CA_INSTALL_TO_OS_TRUST:-1}" -ne 0 ]]; then
       mkdir -p /usr/local/share/ca-certificates
-      local _bn="$(basename "$ROOT_CRT")"
+      local _bn=""
+      bn="$(basename "$ROOT_CRT")"
       if ! cmp -s "$ROOT_CRT" "/usr/local/share/ca-certificates/$_bn" 2>/dev/null; then
         cp "$ROOT_CRT" "/usr/local/share/ca-certificates/$_bn"
         update-ca-certificates >>"$LOG_FILE" 2>&1 || true
@@ -985,7 +980,8 @@ verify_custom_cluster_ca() {
   if [[ ! -f "$ROOT_CA" ]]; then
     # Fallback to OS-installed copy of the configured CA
     if [[ -n "${CUSTOM_CA_ROOT_CRT:-}" ]]; then
-      local bn="$(basename "$CUSTOM_CA_ROOT_CRT")"
+      local bn=""
+      bn="$(basename "$CUSTOM_CA_ROOT_CRT")"
       if [[ -f "/usr/local/share/ca-certificates/$bn" ]]; then
         ROOT_CA="/usr/local/share/ca-certificates/$bn"
       fi
@@ -1176,7 +1172,7 @@ ensure_hosts_pin() {
   # Optionally force-resolve a registry name when DNS is not yet populated.
   local host="$1" ip="$2"
   [[ -z "$host" || -z "$ip" ]] && return 0
-  if ! grep -qE "^[[:space:]]*$ip[[:space:]]+$host(\s|$)" /etc/hosts; then
+  if ! grep -qE "^[[:space:]]*${ip[[:space:]]}+${host(\s|$)}" /etc/hosts; then
     echo "$ip $host" >> /etc/hosts
     log INFO "Pinned $host → $ip in /etc/hosts"
   fi
@@ -1732,10 +1728,13 @@ action_server() {
 
   log INFO "Writing file: /etc/rancher/rke2/config.yaml..."
   mkdir -p /etc/rancher/rke2
+  local cluster_init_value
+  cluster_init_value="$(normalize_bool_value "${CLUSTER_INIT:-true}")"
+
   : > /etc/rancher/rke2/config.yaml
   {
     echo "debug: true"
-    echo "cluster-init: ${CLUSTER_INIT:-true}"
+    echo "cluster-init: $cluster_init_value"
 
     # Optional but recommended: stable join secret for future nodes
     if [[ -n "$TOKEN" ]]; then
@@ -2025,7 +2024,6 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-push) DRY_PUSH=1; shift;;
     -f|-v|-r|-u|-p|-y|-P|-h|push|image|server|add-server|agent|verify) break;;
-    *) break;;
     *) break;;
   esac
 done
