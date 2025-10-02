@@ -28,8 +28,6 @@ spec:
   enable-servicelb: false
   kube-apiserver-arg:
     - audit-log-maxage=15
-  disable:
-    - rke2-ingress-nginx
 
   # Optional: your CA handling
   customCA:
