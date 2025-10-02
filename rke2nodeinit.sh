@@ -810,6 +810,34 @@ gen_sbom_or_metadata() {
   fi
 }
 
+resolve_custom_ca_path() {
+  local input_path="$1"
+  [[ -n "$input_path" ]] || return 0
+
+  local resolved="$input_path"
+
+  # Expand a leading ~ if present (~/certs/foo.pem)
+  if [[ "$resolved" == ~* ]]; then
+    resolved="${resolved/#\~/$HOME}"
+  fi
+
+  # Relative paths are anchored to the script directory so configs can reference repo files.
+  if [[ "${resolved:0:1}" != "/" ]]; then
+    resolved="$SCRIPT_DIR/$resolved"
+  elif [[ ! -e "$resolved" ]]; then
+    # Handle configs that use "/certs/..." while the repository keeps the
+    # bundle at "<repo>/certs/...". If the direct path is missing but the
+    # script-relative variant exists, transparently prefer it.
+    local candidate="$SCRIPT_DIR$resolved"
+    if [[ -e "$candidate" ]]; then
+      log INFO "Resolved custom CA path $resolved via script directory: $candidate"
+      resolved="$candidate"
+    fi
+  fi
+
+  printf '%s' "$resolved"
+}
+
 load_custom_ca_from_config() {
   local file="$1"
   [[ -n "$file" ]] || return 0
@@ -822,31 +850,19 @@ load_custom_ca_from_config() {
   install="$(yaml_spec_get "$file" customCA.installToOSTrust || true)"
 
   if [[ -n "$root" ]]; then
-    if [[ "${root:0:1}" != "/" ]]; then
-      root="$SCRIPT_DIR/$root"
-    fi
-    CUSTOM_CA_ROOT_CRT="$root"
+    CUSTOM_CA_ROOT_CRT="$(resolve_custom_ca_path "$root")"
   fi
 
   if [[ -n "$key" ]]; then
-    if [[ "${key:0:1}" != "/" ]]; then
-      key="$SCRIPT_DIR/$key"
-    fi
-    CUSTOM_CA_ROOT_KEY="$key"
+    CUSTOM_CA_ROOT_KEY="$(resolve_custom_ca_path "$key")"
   fi
 
   if [[ -n "$intcrt" ]]; then
-    if [[ "${intcrt:0:1}" != "/" ]]; then
-      intcrt="$SCRIPT_DIR/$intcrt"
-    fi
-    CUSTOM_CA_INT_CRT="$intcrt"
+    CUSTOM_CA_INT_CRT="$(resolve_custom_ca_path "$intcrt")"
   fi
 
   if [[ -n "$intkey" ]]; then
-    if [[ "${intkey:0:1}" != "/" ]]; then
-      intkey="$SCRIPT_DIR/$intkey"
-    fi
-    CUSTOM_CA_INT_KEY="$intkey"
+    CUSTOM_CA_INT_KEY="$(resolve_custom_ca_path "$intkey")"
   fi
 
   if [[ -n "$install" ]]; then
