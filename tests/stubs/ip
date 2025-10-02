@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ $# -ge 4 && $1 == "-o" && $2 == "-4" && $3 == "route" && $4 == "show" ]]; then
+  echo "default via 192.0.2.1 dev eth0"
+elif [[ $# -ge 4 && $1 == "-4" && $2 == "addr" && $3 == "show" && $4 == "dev" ]]; then
+  dev="$5"
+  cat <<OUT
+2: $dev    inet 10.0.0.10/24 brd 10.0.0.255 scope global $dev
+   valid_lft forever preferred_lft forever
+OUT
+elif [[ $1 == "route" && $2 == "show" && $3 == "default" ]]; then
+  echo "default via 192.0.2.1 dev eth0"
+else
+  exit 0
+fi

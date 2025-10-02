@@ -62,6 +62,15 @@ DOWNLOADS_DIR="$SCRIPT_DIR/downloads"
 STAGE_DIR="/opt/rke2/stage"
 SBOM_DIR="$OUT_DIR/sbom"
 
+: "${ETC_DIR:=/etc}"
+NETPLAN_DIR="${NETPLAN_DIR:-$ETC_DIR/netplan}"
+CLOUD_CFG_DIR="${CLOUD_CFG_DIR:-$ETC_DIR/cloud/cloud.cfg.d}"
+HOSTS_FILE="${HOSTS_FILE:-$ETC_DIR/hosts}"
+RKE2_DIR="${RKE2_DIR:-$ETC_DIR/rancher/rke2}"
+RKE2_CONFIG_FILE="${RKE2_CONFIG_FILE:-$RKE2_DIR/config.yaml}"
+REGISTRIES_FILE="${REGISTRIES_FILE:-$RKE2_DIR/registries.yaml}"
+SITE_DEFAULTS_FILE="${SITE_DEFAULTS_FILE:-$ETC_DIR/rke2image.defaults}"
+
 mkdir -p "$LOG_DIR" "$OUT_DIR" "$DOWNLOADS_DIR" "$STAGE_DIR" "$SBOM_DIR"
 
 # ---------- Defaults & tunables ----------------------------------------------------------------
@@ -293,7 +302,7 @@ append_spec_config_extras() {
   # Skips keys already present to avoid duplicates.
   local file="$1"
   [[ -z "$file" || ! -f "$file" ]] && return 0
-  local cfg="/etc/rancher/rke2/config.yaml"
+  local cfg="$RKE2_CONFIG_FILE"
 
   # Helper to avoid duplicate keys
   _cfg_has_key() { grep -Eq "^[[:space:]]*$1[[:space:]]*:" "$cfg" 2>/dev/null; }
@@ -438,22 +447,24 @@ detect_latest_rke2_version() {
 # ---------- Netplan helpers (robust) ------------------------------------------------------------
 disable_cloud_init_net() {
   # prevent cloud-init from overwriting netplan on reboot
-  mkdir -p /etc/cloud/cloud.cfg.d
-  cat >/etc/cloud/cloud.cfg.d/99-disable-network-config.cfg <<'EOF'
+  mkdir -p "$CLOUD_CFG_DIR"
+  cat >"$CLOUD_CFG_DIR/99-disable-network-config.cfg" <<'EOF'
 # Disable cloud-init network configuration; netplan is managed by rke2nodeinit
 network: {config: disabled}
 EOF
-  log INFO "cloud-init network rendering disabled (/etc/cloud/cloud.cfg.d/99-disable-network-config.cfg)"
+  log INFO "cloud-init network rendering disabled ($CLOUD_CFG_DIR/99-disable-network-config.cfg)"
 }
 
 purge_old_netplan() {
   # back up and remove all existing netplan YAMLs to avoid merged old configs
+  mkdir -p "$NETPLAN_DIR"
   local bdir
-  bdir=$("/etc/netplan/.backup-$(date -u +%Y%m%dT%H%M%SZ)")
+  bdir="$NETPLAN_DIR/.backup-$(date -u +%Y%m%dT%H%M%SZ)"
   mkdir -p "$bdir"
   shopt -s nullglob
   local moved=0
-  for f in /etc/netplan/*.yaml /etc/netplan/*.yml; do
+  for f in "$NETPLAN_DIR"/*.yaml "$NETPLAN_DIR"/*.yml; do
+    [[ -e "$f" ]] || continue
     [[ "$(basename "$f")" == "99-rke-static.yaml" ]] && continue
     mv "$f" "$bdir/" && moved=1
   done
@@ -493,7 +504,7 @@ write_netplan() {
   disable_cloud_init_net
   purge_old_netplan
 
-  local tmp="/etc/netplan/99-rke-static.yaml"
+  local tmp="$NETPLAN_DIR/99-rke-static.yaml"
   : > "$tmp"
 
   {
@@ -542,7 +553,7 @@ write_netplan() {
 
 # ---------- Site defaults -----------------------------------------------------------------------
 load_site_defaults() {
-  local STATE="/etc/rke2image.defaults"
+  local STATE="$SITE_DEFAULTS_FILE"
   if [[ -f "$STATE" ]]; then
     # shellcheck source=/dev/null
     . "$STATE"
@@ -685,10 +696,10 @@ verify_prereqs() {
   [[ -f "$SCRIPT_DIR/downloads/$IMAGES_TAR"     ]] && log INFO "Found images archive"     || log WARN "Images archive missing ($SCRIPT_DIR/downloads)"
   [[ -f "$SCRIPT_DIR/downloads/$RKE2_TARBALL"   ]] && log INFO "Found RKE2 tarball"       || log WARN "RKE2 tarball missing ($SCRIPT_DIR/downloads)"
   [[ -f "$STAGE_DIR/install.sh"                 ]] && log INFO "Staged installer present" || log WARN "Staged installer missing ($STAGE_DIR)"
-  [[ -f /etc/rancher/rke2/registries.yaml      ]] && log INFO "registries.yaml present"   || log WARN "registries.yaml missing"
+  [[ -f "$REGISTRIES_FILE"      ]] && log INFO "registries.yaml present"   || log WARN "registries.yaml missing"
   # Verify the CA file referenced in registries.yaml (if any)
-  if [[ -f /etc/rancher/rke2/registries.yaml ]]; then
-    CA_FILE_PATH="$(awk -F': *' '/ca_file:/ {gsub(/"/,"",$2); print $2}' /etc/rancher/rke2/registries.yaml | head -n1)"
+  if [[ -f "$REGISTRIES_FILE" ]]; then
+    CA_FILE_PATH="$(awk -F': *' '/ca_file:/ {gsub(/"/,"",$2); print $2}' "$REGISTRIES_FILE" | head -n1)"
     if [[ -n "$CA_FILE_PATH" && -f "$CA_FILE_PATH" ]]; then
       log INFO "Registry CA present: $CA_FILE_PATH"
     else
@@ -956,8 +967,8 @@ setup_image_resolution_strategy() {
   [[ -n "$default_offline_registry" ]] && default_host="${default_offline_registry%%/*}"  || default_host=""
 
   # Try to reuse existing registry CA if present
-  if [[ -f /etc/rancher/rke2/registries.yaml ]]; then
-    ca_guess="$(awk -F': *' '/ca_file:/ {gsub(/"/,"",$2); print $2; exit}' /etc/rancher/rke2/registries.yaml 2>/dev/null || true)"
+  if [[ -f "$REGISTRIES_FILE" ]]; then
+    ca_guess="$(awk -F': *' '/ca_file:/ {gsub(/"/,"",$2); print $2; exit}' "$REGISTRIES_FILE" 2>/dev/null || true)"
   fi
   [[ -z "$ca_guess" && -f /usr/local/share/ca-certificates/rke2ca-cert.crt ]] && ca_guess="/usr/local/share/ca-certificates/rke2ca-cert.crt"
 
@@ -1035,9 +1046,9 @@ ensure_hosts_pin() {
   # Optionally force-resolve a registry name when DNS is not yet populated.
   local host="$1" ip="$2"
   [[ -z "$host" || -z "$ip" ]] && return 0
-  if ! grep -qE "^[[:space:]]*$ip[[:space:]]+$host(\s|$)" /etc/hosts; then
-    echo "$ip $host" >> /etc/hosts
-    log INFO "Pinned $host → $ip in /etc/hosts"
+  if ! grep -qE "^[[:space:]]*$ip[[:space:]]+$host(\s|$)" "$HOSTS_FILE"; then
+    echo "$ip $host" >> "$HOSTS_FILE"
+    log INFO "Pinned $host → $ip in $HOSTS_FILE"
   fi
 }
 
@@ -1051,7 +1062,7 @@ write_registries_yaml_with_fallbacks() {
   local pass="$1"; shift || true
   local ca_file="$1"; shift || true
 
-  mkdir -p /etc/rancher/rke2
+  mkdir -p "$RKE2_DIR"
 
   # Build endpoint YAML list
   endpoints_primary="      - \"https://${primary}\""
@@ -1115,9 +1126,9 @@ EOF
     REG_YAML+=$'\n'"  \"${default_offline}\":${auth_block_default}${tls_block_default}"
   fi
 
-  printf "%s\n" "${REG_YAML}" > /etc/rancher/rke2/registries.yaml
-  chmod 600 /etc/rancher/rke2/registries.yaml
-  log INFO "Wrote /etc/rancher/rke2/registries.yaml with endpoints (priority): ${primary}${fallback:+, ${fallback}}${default_offline:+, ${default_offline}}"
+  printf "%s\n" "${REG_YAML}" > "$REGISTRIES_FILE"
+  chmod 600 "$REGISTRIES_FILE"
+  log INFO "Wrote $REGISTRIES_FILE with endpoints (priority): ${primary}${fallback:+, ${fallback}}${default_offline:+, ${default_offline}}"
 }
 
 fetch_rke2_ca_generator() { 
@@ -1203,7 +1214,7 @@ ca_trust_registries() {
       log INFO "Installed $CA_BN into OS trust store."
     fi
     # Persist to site defaults for server phase
-    local STATE="/etc/rke2image.defaults"
+    local STATE="$SITE_DEFAULTS_FILE"
     {
       echo "CUSTOM_CA_ROOT_CRT=\"$CA_ROOT\""
       [[ -n "$CA_KEY"    ]] && echo "CUSTOM_CA_ROOT_KEY=\"$CA_KEY\""
@@ -1219,13 +1230,13 @@ ca_trust_registries() {
   fi
 
   # If a registry is configured, write registries.yaml with mirrors + auth + CA
-  mkdir -p /etc/rancher/rke2
+  mkdir -p "$RKE2_DIR"
   if [[ -n "$REG_HOST" ]]; then
     write_registries_yaml_with_fallbacks "$REG_HOST" "" "" "$REG_USER" "$REG_PASS" "/usr/local/share/ca-certificates/${CA_BN:-}"
   else
-    rm -f /etc/rancher/rke2/registries.yaml 2>/dev/null || true
+    rm -f "$REGISTRIES_FILE" 2>/dev/null || true
   fi
-  : > /etc/rancher/rke2/config.yaml
+  : > "$RKE2_CONFIG_FILE"
 }
 
 install_nerdctl() {
@@ -1440,7 +1451,7 @@ action_image() {
   ca_trust_registries
 
   # --- Save site defaults (DNS/search) ---------------------------------------
-  local STATE="/etc/rke2image.defaults"
+  local STATE="$SITE_DEFAULTS_FILE"
   {
     echo "DEFAULT_DNS=\"$defaultDnsCsv\""
     echo "DEFAULT_SEARCH=\"$defaultSearchCsv\""
@@ -1584,13 +1595,13 @@ action_server() {
 
   log INFO "Setting new hostname: $HOSTNAME..."
   hostnamectl set-hostname "$HOSTNAME"
-  if ! grep -qE "[[:space:]]$HOSTNAME(\$|[[:space:]])" /etc/hosts; then echo "$IP $HOSTNAME" >> /etc/hosts; fi
+  if ! grep -qE "[[:space:]]$HOSTNAME(\$|[[:space:]])" "$HOSTS_FILE"; then echo "$IP $HOSTNAME" >> "$HOSTS_FILE"; fi
 
   setup_custom_cluster_ca || true
 
-  log INFO "Writing file: /etc/rancher/rke2/config.yaml..."
-  mkdir -p /etc/rancher/rke2
-  : > /etc/rancher/rke2/config.yaml
+  log INFO "Writing file: $RKE2_CONFIG_FILE..."
+  mkdir -p "$RKE2_DIR"
+  : > "$RKE2_CONFIG_FILE"
   {
     echo "debug: true"
     echo "cluster-init: ${CLUSTER_INIT:-true}"
@@ -1615,15 +1626,15 @@ action_server() {
 
     echo "write-kubeconfig-mode: \"0640\""
     # Leave system-default-registry unset to preserve cached naming.
-  } >> /etc/rancher/rke2/config.yaml
+  } >> "$RKE2_CONFIG_FILE"
 
   log INFO "Append additional keys from YAML spec (cluster-cidr, domain, cni, etc.)..."
   append_spec_config_extras "$CONFIG_FILE"
 
-  log INFO "Wrote /etc/rancher/rke2/config.yaml"
+  log INFO "Wrote $RKE2_CONFIG_FILE"
 
-  log INFO "Setting file security: chmod 600 /etc/rancher/rke2/config.yaml..."
-  chmod 600 /etc/rancher/rke2/config.yaml
+  log INFO "Setting file security: chmod 600 $RKE2_CONFIG_FILE..."
+  chmod 600 "$RKE2_CONFIG_FILE"
   
   write_netplan "$IP" "$PREFIX" "${GW:-}" "${DNS:-}" "${SEARCH:-}"
 
@@ -1709,19 +1720,19 @@ action_agent() {
   log INFO "Proceeding with offline RKE2 agent install..."
   run_rke2_installer "$SRC" "agent"
     if [[ -n "${RUN_OUT_DIR:-}" ]]; then
-    [[ -f /etc/rancher/rke2/config.yaml ]] && cp -f /etc/rancher/rke2/config.yaml "$RUN_OUT_DIR/${SPEC_NAME}-rke2-config.yaml" && log INFO "Saved rke2 config to $RUN_OUT_DIR/${SPEC_NAME}-rke2-config.yaml"
-    [[ -f /etc/rancher/rke2/registries.yaml ]] && cp -f /etc/rancher/rke2/registries.yaml "$RUN_OUT_DIR/${SPEC_NAME}-registries.yaml" && log INFO "Saved registries to $RUN_OUT_DIR/${SPEC_NAME}-registries.yaml"
+    [[ -f "$RKE2_CONFIG_FILE" ]] && cp -f "$RKE2_CONFIG_FILE" "$RUN_OUT_DIR/${SPEC_NAME}-rke2-config.yaml" && log INFO "Saved rke2 config to $RUN_OUT_DIR/${SPEC_NAME}-rke2-config.yaml"
+    [[ -f "$REGISTRIES_FILE" ]] && cp -f "$REGISTRIES_FILE" "$RUN_OUT_DIR/${SPEC_NAME}-registries.yaml" && log INFO "Saved registries to $RUN_OUT_DIR/${SPEC_NAME}-registries.yaml"
     if [[ -n "${AGENT_CA_CERT:-}" && -f "${AGENT_CA_CERT}" ]]; then cp -f "${AGENT_CA_CERT}" "$RUN_OUT_DIR/${SPEC_NAME}-trusted-ca.crt"; fi
   fi
 
   systemctl enable rke2-agent >>"$LOG_FILE" 2>&1 || true
 
-  mkdir -p /etc/rancher/rke2
-  if [[ -n "$URL" ]];   then echo "server: \"$URL\"" >> /etc/rancher/rke2/config.yaml; fi
-  if [[ -n "$TOKEN" ]]; then echo "token: $TOKEN"  >> /etc/rancher/rke2/config.yaml; fi
+  mkdir -p "$RKE2_DIR"
+  if [[ -n "$URL" ]];   then echo "server: \"$URL\"" >> "$RKE2_CONFIG_FILE"; fi
+  if [[ -n "$TOKEN" ]]; then echo "token: $TOKEN"  >> "$RKE2_CONFIG_FILE"; fi
 
   hostnamectl set-hostname "$HOSTNAME"
-  if ! grep -q "$HOSTNAME" /etc/hosts; then echo "$IP $HOSTNAME" >> /etc/hosts; fi
+  if ! grep -q "$HOSTNAME" "$HOSTS_FILE"; then echo "$IP $HOSTNAME" >> "$HOSTS_FILE"; fi
 
   write_netplan "$IP" "$PREFIX" "${GW:-}" "${DNS:-}" "${SEARCH:-}"
   echo "A reboot is recommended to ensure clean state. Network is already applied."
@@ -1807,10 +1818,10 @@ action_add_server() {
   fi
 
   # Write RKE2 config for join
-  mkdir -p /etc/rancher/rke2
+  mkdir -p "$RKE2_DIR"
   # Preserve existing config (system-default-registry) if present; then append join settings
-  if [[ ! -f /etc/rancher/rke2/config.yaml ]]; then
-    : > /etc/rancher/rke2/config.yaml
+  if [[ ! -f "$RKE2_CONFIG_FILE" ]]; then
+    : > "$RKE2_CONFIG_FILE"
   fi
   {
     echo "server: \"$SERVER_URL\""     # required
@@ -1825,12 +1836,12 @@ action_add_server() {
     echo "  - container-log-max-files=5"
     echo "  - protect-kernel-defaults=true"
     echo "write-kubeconfig-mode: \"0640\""
-  } >> /etc/rancher/rke2/config.yaml
-  chmod 600 /etc/rancher/rke2/config.yaml
+  } >> "$RKE2_CONFIG_FILE"
+  chmod 600 "$RKE2_CONFIG_FILE"
 
   # Append additional keys from YAML spec (cluster-cidr, domain, cni, etc.)
   append_spec_config_extras "$CONFIG_FILE"
-  log INFO "RKE2 join config written to /etc/rancher/rke2/config.yaml"
+  log INFO "RKE2 join config written to $RKE2_CONFIG_FILE"
   log INFO "server: $URL"
   if [[ -n "$TOKEN_FILE" ]]; then log INFO "token_file: $TOKEN_FILE"; else log INFO "token: (redacted)"; fi
 
@@ -1844,7 +1855,7 @@ action_add_server() {
 
   # Basic hostname and /etc/hosts
   hostnamectl set-hostname "$HOSTNAME"
-  if ! grep -q "$HOSTNAME" /etc/hosts; then echo "$IP $HOSTNAME" >> /etc/hosts; fi
+  if ! grep -q "$HOSTNAME" "$HOSTS_FILE"; then echo "$IP $HOSTNAME" >> "$HOSTS_FILE"; fi
 
   write_netplan "$IP" "$PREFIX" "${GW:-}" "${DNS:-}" "${SEARCH:-}"
   echo "A reboot is recommended to ensure clean state. Network is already applied."
@@ -1878,74 +1889,76 @@ action_airgap() {
 # ================================================================================================
 # ARGUMENT PARSING
 # ================================================================================================
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --dry-push) DRY_PUSH=1; shift;;
-    -f|-v|-r|-u|-p|-y|-P|-h|push|image|server|add-server|agent|verify) break;;
-    *) break;;
-    *) break;;
-  esac
-done
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dry-push) DRY_PUSH=1; shift;;
+      -f|-v|-r|-u|-p|-y|-P|-h|push|image|server|add-server|agent|verify) break;;
+      *) break;;
+      *) break;;
+    esac
+  done
 
-while getopts ":f:v:r:u:p:yPh" opt; do
-  case ${opt} in
-    f) CONFIG_FILE="$OPTARG";;
-    v) RKE2_VERSION="$OPTARG";;
-    r) REGISTRY="$OPTARG";;
-    u) REG_USER="$OPTARG";;
-    p) REG_PASS="$OPTARG";;
-    y) AUTO_YES=1;;
-    P) PRINT_CONFIG=1;;
-    h) print_help; exit 0;;
-    \?) echo "Invalid option: -$OPTARG"; print_help; exit 1;;
-    :)  echo "Option -$OPTARG requires an argument"; exit 1;;
-  esac
-done
-shift $((OPTIND-1))
+  while getopts ":f:v:r:u:p:yPh" opt; do
+    case ${opt} in
+      f) CONFIG_FILE="$OPTARG";;
+      v) RKE2_VERSION="$OPTARG";;
+      r) REGISTRY="$OPTARG";;
+      u) REG_USER="$OPTARG";;
+      p) REG_PASS="$OPTARG";;
+      y) AUTO_YES=1;;
+      P) PRINT_CONFIG=1;;
+      h) print_help; exit 0;;
+      \?) echo "Invalid option: -$OPTARG"; print_help; exit 1;;
+      :)  echo "Option -$OPTARG requires an argument"; exit 1;;
+    esac
+  done
+  shift $((OPTIND-1))
 
-CLI_SUB="${1:-}"
-if [[ -z "$CONFIG_FILE" && -n "$CLI_SUB" && -f "$CLI_SUB" ]]; then
-  CONFIG_FILE="$CLI_SUB"; CLI_SUB=""
-fi
-
-YAML_KIND=""
-if [[ -n "$CONFIG_FILE" ]]; then
-  if [[ ! -f "$CONFIG_FILE" ]]; then
-    log ERROR "YAML file not found: $CONFIG_FILE"; exit 5
+  CLI_SUB="${1:-}"
+  if [[ -z "$CONFIG_FILE" && -n "$CLI_SUB" && -f "$CLI_SUB" ]]; then
+    CONFIG_FILE="$CLI_SUB"; CLI_SUB=""
   fi
-  API="$(yaml_get_api "$CONFIG_FILE" || true)"
-  YAML_KIND="$(yaml_get_kind "$CONFIG_FILE" || true)"
-  if [[ "$API" != "rkeprep/v1" ]]; then
-    log ERROR "Unsupported apiVersion: '$API' (expected rkeprep/v1)"; exit 5
-  fi
-  if [[ "$PRINT_CONFIG" -eq 1 ]]; then
-    echo "----- Sanitized YAML -----"
-    sanitize_yaml "$CONFIG_FILE"
-    echo "--------------------------"
-  fi
-fi
 
-ACTION="${CLI_SUB:-}"
-if [[ -n "$CONFIG_FILE" && -z "$CLI_SUB" ]]; then
-  case "$YAML_KIND" in
-    Push|push)        ACTION="push"        ;;
-    Image|image)      ACTION="image"       ;;
-    Airgap|airgap)    ACTION="airgap"      ;;
-    Server|server)    ACTION="server"      ;;
-    AddServer|add-server|addServer) ACTION="add-server" ;;
-    Agent|agent)      ACTION="agent"       ;;
-    Verify|verify)    ACTION="verify"      ;;
-    *) log ERROR "Unsupported or missing YAML kind: '${YAML_KIND:-<none>}'"; exit 5;;
+  YAML_KIND=""
+  if [[ -n "$CONFIG_FILE" ]]; then
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+      log ERROR "YAML file not found: $CONFIG_FILE"; exit 5
+    fi
+    API="$(yaml_get_api "$CONFIG_FILE" || true)"
+    YAML_KIND="$(yaml_get_kind "$CONFIG_FILE" || true)"
+    if [[ "$API" != "rkeprep/v1" ]]; then
+      log ERROR "Unsupported apiVersion: '$API' (expected rkeprep/v1)"; exit 5
+    fi
+    if [[ "$PRINT_CONFIG" -eq 1 ]]; then
+      echo "----- Sanitized YAML -----"
+      sanitize_yaml "$CONFIG_FILE"
+      echo "--------------------------"
+    fi
+  fi
+
+  ACTION="${CLI_SUB:-}"
+  if [[ -n "$CONFIG_FILE" && -z "$CLI_SUB" ]]; then
+    case "$YAML_KIND" in
+      Push|push)        ACTION="push"        ;;
+      Image|image)      ACTION="image"       ;;
+      Airgap|airgap)    ACTION="airgap"      ;;
+      Server|server)    ACTION="server"      ;;
+      AddServer|add-server|addServer) ACTION="add-server" ;;
+      Agent|agent)      ACTION="agent"       ;;
+      Verify|verify)    ACTION="verify"      ;;
+      *) log ERROR "Unsupported or missing YAML kind: '${YAML_KIND:-<none>}'"; exit 5;;
+    esac
+  fi
+
+  case "${ACTION:-}" in
+    image)       action_image  ;;
+    server)      action_server ;;
+    agent)       action_agent  ;;
+    verify)      action_verify ;;
+    add-server|add_server) action_add_server ;;
+    airgap)      action_airgap ;;
+    push)        action_push   ;;
+    *) print_help; exit 1 ;;
   esac
 fi
-
-case "${ACTION:-}" in
-  image)       action_image  ;;
-  server)      action_server ;;
-  agent)       action_agent  ;;
-  verify)      action_verify ;;
-  add-server|add_server) action_add_server ;;
-  airgap)      action_airgap ;;
-  push)        action_push   ;;
-  *) print_help; exit 1 ;;
-esac

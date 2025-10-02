@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+echo "netplan $*" >> "${TEST_ROOT:-/tmp}/netplan.log"
+exit 0

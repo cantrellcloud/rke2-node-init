@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ $# -ge 1 && $1 == "--static" ]]; then
+  echo "stub-host"
+elif [[ $# -ge 2 && $1 == "set-hostname" ]]; then
+  echo "$2" > "${TEST_ROOT:-/tmp}/hostnamectl-set"
+else
+  :
+fi
+exit 0
