@@ -1436,6 +1436,7 @@ action_image() {
 
   # --- SBOM and README -------------------------------------------------------
   # SBOM lists filenames, sizes, sha256; write to $SBOM_DIR/<name>-sbom.txt
+  log INFO "Creating SBOM..."
   mkdir -p "$SBOM_DIR"
   local sbom_name="${SPEC_NAME:-image}"
   local sbom_file="$SBOM_DIR/${sbom_name}-sbom.txt"
@@ -1445,6 +1446,7 @@ action_image() {
     echo "RKE2_VERSION: ${RKE2_VERSION}"
     echo "REGISTRY: ${REGISTRY}"
     echo
+	log INFO "Hashes and sizes of cached artifacts in $DOWNLOADS_DIR: ..."
 	echo "Hashes and sizes of cached artifacts in $DOWNLOADS_DIR:"
     for f in "$DOWNLOADS_DIR/$IMAGES_TAR" "$DOWNLOADS_DIR/$RKE2_TARBALL" "$DOWNLOADS_DIR/$SHA256_FILE" "$DOWNLOADS_DIR/install.sh" "$DOWNLOADS_DIR/$full_tgz" "$DOWNLOADS_DIR/$std_tgz"; do
       [[ -f "$f" ]] || continue
@@ -1455,6 +1457,7 @@ action_image() {
   log INFO "SBOM written to $sbom_file"
 
   # README in outputs/<SPEC_NAME>
+  log INFO "Write README in Outputs directory..."
   if [[ -n "${RUN_OUT_DIR:-}" ]]; then
     {
       echo "# Air-Gapped Image Prep Summary"
@@ -1473,13 +1476,14 @@ action_image() {
       echo "  - Search Domains: ${defaultSearchCsv:-<none>}"
       echo
       echo "Next:"
-      echo "  - Shut down this VM and clone it for use in the air‑gapped environment."
+      echo "  - Shut down this VM and clone it for use in the air-gapped environment."
       echo "  - Then run this script in 'server' or 'agent' mode on the clone(s)."
     } > "$RUN_OUT_DIR/README.txt"
     log INFO "Wrote $RUN_OUT_DIR/README.txt"
   fi
 
  # Image prep complete
+  log INFO "Image prep complete..."
   echo "[READY] Minimal image prep complete. Cached artifacts in: $DOWNLOADS_DIR"
   echo "        - You can now install RKE2 offline using the cached tarballs."
   echo
