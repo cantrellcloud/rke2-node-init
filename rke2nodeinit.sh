@@ -668,6 +668,73 @@ emit_tls_sans() {
   done
 }
 
+check_system_settings() {
+  log INFO "Configuring required kernel modules and sysctl settings..."
+  mkdir -p /etc/modules-load.d /etc/sysctl.d
+  cat >/etc/modules-load.d/rke2.conf <<EOF
+br_netfilter
+overlay
+EOF
+  modprobe br_netfilter || true
+  modprobe overlay || true
+
+  cat >/etc/sysctl.d/90-rke2.conf <<EOF
+net.bridge.bridge-nf-call-iptables = 1
+net.bridge.bridge-nf-call-ip6tables = 1
+net.ipv4.ip_forward = 1
+EOF
+  sysctl --system >/dev/null 2>>"$LOG_FILE" || true
+}
+
+check_swap() {
+  # ------------------ Swap off (now and persistent) ------------------
+  log INFO "Disabling swap (now and persistent)..."
+  if swapon --show | grep -q .; then
+    log WARN "Swap is enabled; disabling now."
+    swapoff -a || true
+  fi
+  if grep -qs '^\S\+\s\+\S\+\s\+swap\s' /etc/fstab; then
+    log INFO "Commenting swap entries in /etc/fstab for Kubernetes compatibility."
+    sed -ri 's/^(\s*[^#\s]+\s+[^#\s]+\s+swap\s+.*)$/# \1/' /etc/fstab
+  fi
+}
+
+check_networkmanager() {
+  # ------------------ NetworkManager: ignore CNI if present ------------------
+  log INFO "Configuring NetworkManager (if present) to ignore cni*/flannel* interfaces..."
+  if systemctl list-unit-files | grep -q '^NetworkManager.service'; then
+    mkdir -p /etc/NetworkManager/conf.d
+    cat >/etc/NetworkManager/conf.d/rke2-cni-unmanaged.conf <<'NM'
+[keyfile]
+unmanaged-devices=interface-name:cni*,interface-name:flannel.*,interface-name:flannel.1
+NM
+    systemctl restart NetworkManager || true
+    log INFO "Configured NetworkManager to ignore cni*/flannel* interfaces."
+  fi
+}
+
+check_iptables() {
+  log INFO "Ensuring iptables-nft is the default iptables backend..."
+  if update-alternatives --list iptables >/dev/null 2>&1; then
+    update-alternatives --set iptables  /usr/sbin/iptables-nft >>"$LOG_FILE" 2>&1 || true
+    update-alternatives --set ip6tables /usr/sbin/ip6tables-nft >>"$LOG_FILE" 2>&1 || true
+    update-alternatives --set arptables /usr/sbin/arptables-nft >>"$LOG_FILE" 2>&1 || true
+    update-alternatives --set ebtables  /usr/sbin/ebtables-nft  >>"$LOG_FILE" 2>&1 || true
+  fi
+}
+
+check_ufw() {
+  # ------------------ Open ports if UFW is active ------------------
+  log INFO "Configuring UFW (if active) to allow RKE2 ports..."
+  if command -v ufw >/dev/null 2>&1 && ufw status | grep -q 'Status: active'; then
+    ufw allow 6443/tcp || true   # Kubernetes API
+    ufw allow 9345/tcp || true   # RKE2 supervisor
+    ufw allow 10250/tcp || true  # kubelet
+    ufw allow 8472/udp || true   # VXLAN for CNI (flannel)
+    log INFO "UFW rules added for 6443/tcp, 9345/tcp, 10250/tcp, 8472/udp."
+  fi
+}
+
 # ---------- OS prereqs --------------------------------------------------------------------------
 install_rke2_prereqs() {
   log INFO "Installing RKE2 prereqs (apt-packages, iptables-nft, modules, sysctl, swapoff, network-manager, ufw)..."
@@ -685,62 +752,12 @@ install_rke2_prereqs() {
   log INFO "Removing unnecessary packages..."
   spinner_run "Removing unnecessary packages" apt-get autoremove -y # >>"$LOG_FILE" 2>&1
 
-  log INFO "Ensuring iptables-nft is the default iptables backend..."
-  if update-alternatives --list iptables >/dev/null 2>&1; then
-    update-alternatives --set iptables  /usr/sbin/iptables-nft >>"$LOG_FILE" 2>&1 || true
-    update-alternatives --set ip6tables /usr/sbin/ip6tables-nft >>"$LOG_FILE" 2>&1 || true
-    update-alternatives --set arptables /usr/sbin/arptables-nft >>"$LOG_FILE" 2>&1 || true
-    update-alternatives --set ebtables  /usr/sbin/ebtables-nft  >>"$LOG_FILE" 2>&1 || true
-  fi
+ # check_system_settings
+ # check_swap
+ # check_networkmanager
+ # check_iptables
+ # check_ufw
 
-  log INFO "Configuring required kernel modules and sysctl settings..."
-  mkdir -p /etc/modules-load.d /etc/sysctl.d
-  cat >/etc/modules-load.d/rke2.conf <<EOF
-br_netfilter
-overlay
-EOF
-  modprobe br_netfilter || true
-  modprobe overlay || true
-
-  cat >/etc/sysctl.d/90-rke2.conf <<EOF
-net.bridge.bridge-nf-call-iptables = 1
-net.bridge.bridge-nf-call-ip6tables = 1
-net.ipv4.ip_forward = 1
-EOF
-  sysctl --system >/dev/null 2>>"$LOG_FILE" || true
-
-  # ------------------ Swap off (now and persistent) ------------------
-  log INFO "Disabling swap (now and persistent)..."
-  if swapon --show | grep -q .; then
-    log WARN "Swap is enabled; disabling now."
-    swapoff -a || true
-  fi
-  if grep -qs '^\S\+\s\+\S\+\s\+swap\s' /etc/fstab; then
-    log INFO "Commenting swap entries in /etc/fstab for Kubernetes compatibility."
-    sed -ri 's/^(\s*[^#\s]+\s+[^#\s]+\s+swap\s+.*)$/# \1/' /etc/fstab
-  fi
-
-  # ------------------ NetworkManager: ignore CNI if present ------------------
-  log INFO "Configuring NetworkManager (if present) to ignore cni*/flannel* interfaces..."
-  if systemctl list-unit-files | grep -q '^NetworkManager.service'; then
-    mkdir -p /etc/NetworkManager/conf.d
-    cat >/etc/NetworkManager/conf.d/rke2-cni-unmanaged.conf <<'NM'
-[keyfile]
-unmanaged-devices=interface-name:cni*,interface-name:flannel.*,interface-name:flannel.1
-NM
-    systemctl restart NetworkManager || true
-    log INFO "Configured NetworkManager to ignore cni*/flannel* interfaces."
-  fi
-
-  # ------------------ Open ports if UFW is active ------------------
-  log INFO "Configuring UFW (if active) to allow RKE2 ports..."
-  if command -v ufw >/dev/null 2>&1 && ufw status | grep -q 'Status: active'; then
-    ufw allow 6443/tcp || true   # Kubernetes API
-    ufw allow 9345/tcp || true   # RKE2 supervisor
-    ufw allow 10250/tcp || true  # kubelet
-    ufw allow 8472/udp || true   # VXLAN for CNI (flannel)
-    log INFO "UFW rules added for 6443/tcp, 9345/tcp, 10250/tcp, 8472/udp."
-  fi
 }
 
 verify_prereqs() {
