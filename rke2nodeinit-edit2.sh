@@ -578,19 +578,22 @@ emit_tls_sans() {
 
 # ---------- OS prereqs --------------------------------------------------------------------------
 install_rke2_prereqs() {
-  log INFO "Installing RKE2 prereqs (iptables-nft, modules, sysctl, swapoff)"
+  log INFO "Installing RKE2 prereqs (apt-packages, iptables-nft, modules, sysctl, swapoff, network-manager, ufw)..."
   export DEBIAN_FRONTEND=noninteractive
-  log INFO "Updating APT package cache"
+  log INFO "Updating APT package cache..."
   spinner_run "Updating APT package cache" apt-get update -y
-  log INFO "Upgrading APT packages"
+  log INFO "Installing apt-utils..."
+  spinner_run "Installing apt-utils" apt-get install -y apt-utils
+  log INFO "Upgrading APT packages..."
   spinner_run "Upgrading APT packages" apt-get upgrade -y
-  log INFO "Installing required packages"
+  log INFO "Installing required packages..."
   spinner_run "Installing required packages" apt-get install -y \
     curl ca-certificates iptables nftables ethtool socat conntrack iproute2 \
     ebtables openssl tar gzip zstd jq
-  log INFO "Removing unnecessary packages"
+  log INFO "Removing unnecessary packages..."
   spinner_run "Removing unnecessary packages" apt-get autoremove -y # >>"$LOG_FILE" 2>&1
 
+  log INFO "Ensuring iptables-nft is the default iptables backend..."
   if update-alternatives --list iptables >/dev/null 2>&1; then
     update-alternatives --set iptables  /usr/sbin/iptables-nft >>"$LOG_FILE" 2>&1 || true
     update-alternatives --set ip6tables /usr/sbin/ip6tables-nft >>"$LOG_FILE" 2>&1 || true
@@ -598,6 +601,7 @@ install_rke2_prereqs() {
     update-alternatives --set ebtables  /usr/sbin/ebtables-nft  >>"$LOG_FILE" 2>&1 || true
   fi
 
+  log INFO "Configuring required kernel modules and sysctl settings..."
   mkdir -p /etc/modules-load.d /etc/sysctl.d
   cat >/etc/modules-load.d/rke2.conf <<EOF
 br_netfilter
@@ -614,6 +618,7 @@ EOF
   sysctl --system >/dev/null 2>>"$LOG_FILE" || true
 
   # ------------------ Swap off (now and persistent) ------------------
+  log INFO "Disabling swap (now and persistent)..."
   if swapon --show | grep -q .; then
     log WARN "Swap is enabled; disabling now."
     swapoff -a || true
@@ -624,6 +629,7 @@ EOF
   fi
 
   # ------------------ NetworkManager: ignore CNI if present ------------------
+  log INFO "Configuring NetworkManager (if present) to ignore cni*/flannel* interfaces..."
   if systemctl list-unit-files | grep -q '^NetworkManager.service'; then
     mkdir -p /etc/NetworkManager/conf.d
     cat >/etc/NetworkManager/conf.d/rke2-cni-unmanaged.conf <<'NM'
@@ -635,6 +641,7 @@ NM
   fi
 
   # ------------------ Open ports if UFW is active ------------------
+  log INFO "Configuring UFW (if active) to allow RKE2 ports..."
   if command -v ufw >/dev/null 2>&1 && ufw status | grep -q 'Status: active'; then
     ufw allow 6443/tcp || true   # Kubernetes API
     ufw allow 9345/tcp || true   # RKE2 supervisor
@@ -1180,6 +1187,96 @@ cache_rke2_artifacts() {
   fi
 }
 
+ca_trust_registries() {
+  # --- Optional: CA trust + registries mirrors -------------------------------
+  local CA_BN=""
+  if [[ -n "$CA_ROOT" && -f "$CA_ROOT" ]]; then
+    CA_BN="$(basename "$CA_ROOT")"
+    if [[ "$CA_INSTALL" =~ ^([Tt]rue|1|yes|Y)$ ]]; then
+      mkdir -p /usr/local/share/ca-certificates
+      cp -f "$CA_ROOT" "/usr/local/share/ca-certificates/$CA_BN"
+      update-ca-certificates >>"$LOG_FILE" 2>&1 || true
+      log INFO "Installed $CA_BN into OS trust store."
+    fi
+    # Persist to site defaults for server phase
+    local STATE="/etc/rke2image.defaults"
+    {
+      echo "CUSTOM_CA_ROOT_CRT=\"$CA_ROOT\""
+      [[ -n "$CA_KEY"    ]] && echo "CUSTOM_CA_ROOT_KEY=\"$CA_KEY\""
+      [[ -n "$CA_INTCRT" ]] && echo "CUSTOM_CA_INT_CRT=\"$CA_INTCRT\""
+      [[ -n "$CA_INTKEY" ]] && echo "CUSTOM_CA_INT_KEY=\"$CA_INTKEY\""
+      if [[ "$CA_INSTALL" =~ ^([Tt]rue|1|yes|Y)$ ]]; then
+        echo "CUSTOM_CA_INSTALL_TO_OS_TRUST=1"
+      else
+        echo "CUSTOM_CA_INSTALL_TO_OS_TRUST=0"
+      fi
+    } >> "$STATE"
+    chmod 600 "$STATE"
+  fi
+
+  # If a registry is configured, write registries.yaml with mirrors + auth + CA
+  mkdir -p /etc/rancher/rke2
+  if [[ -n "$REG_HOST" ]]; then
+    write_registries_yaml_with_fallbacks "$REG_HOST" "" "" "$REG_USER" "$REG_PASS" "/usr/local/share/ca-certificates/${CA_BN:-}"
+  else
+    rm -f /etc/rancher/rke2/registries.yaml 2>/dev/null || true
+  fi
+  : > /etc/rancher/rke2/config.yaml
+}
+
+install_nerdctl() {
+  # --- Detect/cache nerdctl: FULL (cache only) + standalone (install) --------
+  ensure_installed curl
+  ensure_installed ca-certificates
+  local api="https://api.github.com/repos/containerd/nerdctl/releases/latest"
+  local ntag nver full_tgz std_tgz full_url std_url
+  ntag="$(curl -fsSL "$api" | grep -Po '"tag_name":\s*"\K[^"]+' || true)"
+  if [[ -n "$ntag" ]]; then
+    nver="${ntag#v}"
+    full_tgz="nerdctl-full-${nver}-linux-${ARCH}.tar.gz"
+    std_tgz="nerdctl-${nver}-linux-${ARCH}.tar.gz"
+    full_url="https://github.com/containerd/nerdctl/releases/download/${ntag}/${full_tgz}"
+    std_url="https://github.com/containerd/nerdctl/releases/download/${ntag}/${std_tgz}"
+    mkdir -p "$DOWNLOADS_DIR"
+    # Cache FULL bundle
+    if [[ ! -f "$DOWNLOADS_DIR/$full_tgz" ]]; then
+      spinner_run "Caching nerdctl FULL ${ntag}" curl -Lf "$full_url" -o "$DOWNLOADS_DIR/$full_tgz"
+      log INFO "Cached $(basename "$DOWNLOADS_DIR/$full_tgz")"
+    else
+      log INFO "nerdctl FULL already cached: $(basename "$DOWNLOADS_DIR/$full_tgz")"
+    fi
+    # Cache standalone tarball
+    if [[ ! -f "$DOWNLOADS_DIR/$std_tgz" ]]; then
+      spinner_run "Caching nerdctl standalone ${ntag}" curl -Lf "$std_url" -o "$DOWNLOADS_DIR/$std_tgz"
+      log INFO "Cached $(basename "$DOWNLOADS_DIR/$std_tgz")"
+    else
+      log INFO "nerdctl standalone already cached: $(basename "$DOWNLOADS_DIR/$std_tgz")"
+    fi
+    # Install ONLY the standalone nerdctl binary
+    if [[ -f "$DOWNLOADS_DIR/$std_tgz" ]]; then
+      tmpdir="$(mktemp -d)"
+      tar -C "$tmpdir" -xzf "$DOWNLOADS_DIR/$std_tgz"
+      # tar contains 'nerdctl'
+      if [[ -f "$tmpdir/nerdctl" ]]; then
+        install -m 0755 "$tmpdir/nerdctl" /usr/local/bin/nerdctl
+        log INFO "Installed standalone nerdctl to /usr/local/bin/nerdctl"
+      else
+        # Fallback: look for nested path
+        found="$(find "$tmpdir" -type f -name nerdctl | head -n1 || true)"
+        if [[ -n "$found" ]]; then
+          install -m 0755 "$found" /usr/local/bin/nerdctl
+          log INFO "Installed standalone nerdctl from archive path to /usr/local/bin/nerdctl"
+        else
+          log WARN "nerdctl binary not found in $std_tgz; skipping install"
+        fi
+      fi
+      rm -rf "$tmpdir"
+    fi
+  else
+    log WARN "Could not detect nerdctl latest release via GitHub API."
+  fi
+}
+
 prompt_reboot() {
   echo
   if (( AUTO_YES )); then
@@ -1323,95 +1420,10 @@ action_image() {
 
   # --- OS prereqs ------------------------------------------------------------
   install_rke2_prereqs
-
-  # --- Detect/cache nerdctl: FULL (cache only) + standalone (install) --------
-  ensure_installed curl
-  ensure_installed ca-certificates
-  local api="https://api.github.com/repos/containerd/nerdctl/releases/latest"
-  local ntag nver full_tgz std_tgz full_url std_url
-  ntag="$(curl -fsSL "$api" | grep -Po '"tag_name":\s*"\K[^"]+' || true)"
-  if [[ -n "$ntag" ]]; then
-    nver="${ntag#v}"
-    full_tgz="nerdctl-full-${nver}-linux-${ARCH}.tar.gz"
-    std_tgz="nerdctl-${nver}-linux-${ARCH}.tar.gz"
-    full_url="https://github.com/containerd/nerdctl/releases/download/${ntag}/${full_tgz}"
-    std_url="https://github.com/containerd/nerdctl/releases/download/${ntag}/${std_tgz}"
-    mkdir -p "$DOWNLOADS_DIR"
-    # Cache FULL bundle
-    if [[ ! -f "$DOWNLOADS_DIR/$full_tgz" ]]; then
-      spinner_run "Caching nerdctl FULL ${ntag}" curl -Lf "$full_url" -o "$DOWNLOADS_DIR/$full_tgz"
-      log INFO "Cached $(basename "$DOWNLOADS_DIR/$full_tgz")"
-    else
-      log INFO "nerdctl FULL already cached: $(basename "$DOWNLOADS_DIR/$full_tgz")"
-    fi
-    # Cache standalone tarball
-    if [[ ! -f "$DOWNLOADS_DIR/$std_tgz" ]]; then
-      spinner_run "Caching nerdctl standalone ${ntag}" curl -Lf "$std_url" -o "$DOWNLOADS_DIR/$std_tgz"
-      log INFO "Cached $(basename "$DOWNLOADS_DIR/$std_tgz")"
-    else
-      log INFO "nerdctl standalone already cached: $(basename "$DOWNLOADS_DIR/$std_tgz")"
-    fi
-    # Install ONLY the standalone nerdctl binary
-    if [[ -f "$DOWNLOADS_DIR/$std_tgz" ]]; then
-      tmpdir="$(mktemp -d)"
-      tar -C "$tmpdir" -xzf "$DOWNLOADS_DIR/$std_tgz"
-      # tar contains 'nerdctl'
-      if [[ -f "$tmpdir/nerdctl" ]]; then
-        install -m 0755 "$tmpdir/nerdctl" /usr/local/bin/nerdctl
-        log INFO "Installed standalone nerdctl to /usr/local/bin/nerdctl"
-      else
-        # Fallback: look for nested path
-        found="$(find "$tmpdir" -type f -name nerdctl | head -n1 || true)"
-        if [[ -n "$found" ]]; then
-          install -m 0755 "$found" /usr/local/bin/nerdctl
-          log INFO "Installed standalone nerdctl from archive path to /usr/local/bin/nerdctl"
-        else
-          log WARN "nerdctl binary not found in $std_tgz; skipping install"
-        fi
-      fi
-      rm -rf "$tmpdir"
-    fi
-  else
-    log WARN "Could not detect nerdctl latest release via GitHub API."
-  fi
-
+ # install_nerdctl
   fetch_rke2_ca_generator
   cache_rke2_artifacts
-
-  # --- Optional: CA trust + registries mirrors -------------------------------
-  local CA_BN=""
-  if [[ -n "$CA_ROOT" && -f "$CA_ROOT" ]]; then
-    CA_BN="$(basename "$CA_ROOT")"
-    if [[ "$CA_INSTALL" =~ ^([Tt]rue|1|yes|Y)$ ]]; then
-      mkdir -p /usr/local/share/ca-certificates
-      cp -f "$CA_ROOT" "/usr/local/share/ca-certificates/$CA_BN"
-      update-ca-certificates >>"$LOG_FILE" 2>&1 || true
-      log INFO "Installed $CA_BN into OS trust store."
-    fi
-    # Persist to site defaults for server phase
-    local STATE="/etc/rke2image.defaults"
-    {
-      echo "CUSTOM_CA_ROOT_CRT=\"$CA_ROOT\""
-      [[ -n "$CA_KEY"    ]] && echo "CUSTOM_CA_ROOT_KEY=\"$CA_KEY\""
-      [[ -n "$CA_INTCRT" ]] && echo "CUSTOM_CA_INT_CRT=\"$CA_INTCRT\""
-      [[ -n "$CA_INTKEY" ]] && echo "CUSTOM_CA_INT_KEY=\"$CA_INTKEY\""
-      if [[ "$CA_INSTALL" =~ ^([Tt]rue|1|yes|Y)$ ]]; then
-        echo "CUSTOM_CA_INSTALL_TO_OS_TRUST=1"
-      else
-        echo "CUSTOM_CA_INSTALL_TO_OS_TRUST=0"
-      fi
-    } >> "$STATE"
-    chmod 600 "$STATE"
-  fi
-
-  # If a registry is configured, write registries.yaml with mirrors + auth + CA
-  mkdir -p /etc/rancher/rke2
-  if [[ -n "$REG_HOST" ]]; then
-    write_registries_yaml_with_fallbacks "$REG_HOST" "" "" "$REG_USER" "$REG_PASS" "/usr/local/share/ca-certificates/${CA_BN:-}"
-  else
-    rm -f /etc/rancher/rke2/registries.yaml 2>/dev/null || true
-  fi
-  : > /etc/rancher/rke2/config.yaml
+  ca_trust_registries
 
   # --- Save site defaults (DNS/search) ---------------------------------------
   local STATE="/etc/rke2image.defaults"
