@@ -27,7 +27,7 @@ esac
 # ----------------------------------------------------
 # Purpose:
 #   Prepare and configure a Linux VM/host (Ubuntu/Debian-based) for an offline/air-gapped
-#   Rancher RKE2 Kubernetes deployment using **containerd + nerdctl** ONLY.
+#   Rancher RKE2 Kubernetes deployment using official RKE2 Rancher images.
 #
 # Actions:
 #   1) push   - Tag and push preloaded images into a private registry (nerdctl only)
@@ -35,17 +35,21 @@ esac
 #   3) server - Configure network/hostname and install rke2-server (offline)
 #   4) agent  - Configure network/hostname and install rke2-agent  (offline)
 #   5) verify - Check that node prerequisites are in place
+#   6) airgap - Run 'image' without reboot and power off the machine for templating
 #
 # Connectivity expectations:
 #   - image is the only action that requires Internet access in order to gather
 #     artifacts. It should be run from a host with outbound connectivity.
 #   - push, server, add-server, agent, verify, and airgap are intended to run fully
-#     offline and must not initiate Internet access.
+#     offline and do not initiate Internet access.
 #
 # Major changes vs previous:
-#   - Runtime install uses official "nerdctl-full" bundle (includes containerd, runc, CNI, BuildKit).
+#   - Runtime install caches official "nerdctl-full" bundle (includes containerd, runc, CNI, BuildKit).
+#     Only used as a standby CRI/O runtime if the RKE2-installed containerd fails.
+#   - Uses standalone nerdctl binary for image operations (no Docker dependency).
+#     Only used as a standby CLI if RKE2-installed nerdctl fails.  
 #   - Fixed verify() return code logic so success returns 0.
-#   - Added progress indicators + extra logging for containerd/nerdctl install.
+#   - Added progress indicators + extra logging for downloads and binary installs.
 #   - Hardened Netplan so old IP/GW don’t return after reboot (cloud-init disabled; old YAMLs removed).
 #
 # Safety:
@@ -373,8 +377,6 @@ PY
   ' "$file"
 }
 
-# --- YAML helpers (robust under 'spec:' for scalars and lists) ---
-
 # ------------------------------------------------------------------------------
 # Function: yaml_spec_get_any
 # Purpose : Return the first non-empty value among a list of dotted keys under
@@ -693,8 +695,6 @@ initialize_action_context() {
   fi
 }
 
-# ---------- Validators --------------------------------------------------------------------------
-
 # ------------------------------------------------------------------------------
 # Function: valid_ipv4
 # Purpose : Validate dotted-decimal IPv4 addresses provided by users or YAML
@@ -769,8 +769,6 @@ valid_search_domains_csv() {
   done
 }
 
-# ---------- APT helper --------------------------------------------------------------------------
-
 # ------------------------------------------------------------------------------
 # Function: ensure_installed
 # Purpose : Verify that the specified APT package is present and install it
@@ -789,8 +787,6 @@ ensure_installed() {
     apt-get install -y "$pkg" >>"$LOG_FILE" 2>&1
   }
 }
-
-# ---------- RKE2 version detection --------------------------------------------------------------
 
 # ------------------------------------------------------------------------------
 # Function: detect_latest_rke2_version
@@ -813,8 +809,6 @@ detect_latest_rke2_version() {
     log INFO "Using RKE2 version: $RKE2_VERSION"
   fi
 }
-
-# ---------- Netplan helpers (robust) ------------------------------------------------------------
 
 # ------------------------------------------------------------------------------
 # Function: disable_cloud_init_net
@@ -880,8 +874,6 @@ apply_netplan_now() {
   fi
   return 0
 }
-
-# ---------- Netplan writer (static IPv4 + DNS + search domains) --------------------------------
 
 # ------------------------------------------------------------------------------
 # Function: write_netplan
@@ -965,8 +957,6 @@ write_netplan() {
   ip -4 addr show dev "$nic"   | sed 's/^/IFACE: /'  >>"$LOG_FILE" 2>&1 || true
   ip route show default        | sed 's/^/ROUTE: /'  >>"$LOG_FILE" 2>&1 || true
 }
-
-# ---------- Site defaults -----------------------------------------------------------------------
 
 # ------------------------------------------------------------------------------
 # Function: load_site_defaults
@@ -1148,7 +1138,6 @@ check_ufw() {
   fi
 }
 
-# ---------- OS prereqs --------------------------------------------------------------------------
 # ------------------------------------------------------------------------------
 # Function: install_rke2_prereqs
 # Purpose : Aggregate prerequisite checks for offline installs. Installs base
@@ -1238,7 +1227,6 @@ verify_prereqs() {
   return $fail
 }
 
-# ---------- SBOM / metadata (optional) ----------------------------------------------------------
 # ------------------------------------------------------------------------------
 # Function: sanitize_img
 # Purpose : Convert an image reference into a filesystem-safe string by replacing
@@ -1798,69 +1786,6 @@ ensure_staged_artifacts() {
     exit 3
   fi
 }
-
-# ------------------------------------------------------------------------------
-# Function: setup_image_resolution_strategy
-# Purpose : Configure containerd image resolution order, preferring local tarball
-#           caches before falling back to upstream registries.
-# Arguments:
-#   None
-# Returns :
-#   Returns 0 on success.
-# ------------------------------------------------------------------------------
-setup_image_resolution_strategy() {
-  # Read primary and fallback registries from YAML (if present), else derive from existing variables.
-  local primary_registry="" fallback_registry="" default_offline_registry="" primary_host="" fallback_host="" default_host=""
-  local reg_user="${REG_USER:-}" reg_pass="${REG_PASS:-}" ca_guess=""
-
-  if [[ -n "$CONFIG_FILE" ]]; then
-    primary_registry="$(yaml_spec_get "$CONFIG_FILE" registry || echo "${REGISTRY:-}")"
-    fallback_registry="$(yaml_spec_get "$CONFIG_FILE" fallbackRegistry || true)"
-    default_offline_registry="$(yaml_spec_get "$CONFIG_FILE" defaultOfflineRegistry || true)"
-    # Optional pinned IPs for /etc/hosts
-    local primary_ip fallback_ip
-    primary_ip="$(yaml_spec_get "$CONFIG_FILE" registryIP || true)"
-    fallback_ip="$(yaml_spec_get "$CONFIG_FILE" fallbackRegistryIP || true)"
-    ensure_hosts_pin "${primary_registry%%/*}" "${primary_ip}"
-    ensure_hosts_pin "${fallback_registry%%/*}" "${fallback_ip}"
-    # Possible credentials
-    reg_user="$(yaml_spec_get "$CONFIG_FILE" registryUsername || echo "${reg_user}")"
-    reg_pass="$(yaml_spec_get "$CONFIG_FILE" registryPassword || echo "${reg_pass}")"
-  fi
-
-  # Fallbacks if still empty
-  primary_registry="${primary_registry:-${REGISTRY:-'rke2registry.dev.local'}}"
-  primary_host="${primary_registry%%/*}"
-  [[ -n "$fallback_registry" ]]        && fallback_host="${fallback_registry%%/*}"        || fallback_host=""
-  [[ -n "$default_offline_registry" ]] && default_host="${default_offline_registry%%/*}"  || default_host=""
-
-  # Try to reuse existing registry CA if present
-  if [[ -f /etc/rancher/rke2/registries.yaml ]]; then
-    ca_guess="$(awk -F': *' '/ca_file:/ {gsub(/"/,"",$2); print $2; exit}' /etc/rancher/rke2/registries.yaml 2>/dev/null || true)"
-  fi
-  [[ -z "$ca_guess" && -f /usr/local/share/ca-certificates/rke2ca-cert.crt ]] && ca_guess="/usr/local/share/ca-certificates/rke2ca-cert.crt"
-
-  # 1) Load staged images, 2) Retag locally with the primary host so containerd finds them without network
-  load_staged_images
-  retag_local_images_with_prefix "$primary_host"
-
-  # 3) Mirror upstreams to offline endpoints, in order (primary → fallback → default)
-  write_registries_yaml_with_fallbacks "$primary_host" "$fallback_host" "$default_host" "$reg_user" "$reg_pass" "$ca_guess"
-
-  # 4) Ensure system-default-registry matches the primary host (so RKE2 will try it)
-  #mkdir -p /etc/rancher/rke2
-  #if ! grep -q '^system-default-registry:' /etc/rancher/rke2/config.yaml 2>/dev/null; then
-  #  echo "system-default-registry: \"$primary_host\"" >> /etc/rancher/rke2/config.yaml
-  #else
-  #  sed -i -E "s|^system-default-registry:.*$|system-default-registry: \"${primary_host}\"|g" /etc/rancher/rke2/config.yaml
-  #fi
-  #log INFO "Set system-default-registry: ${primary_host}"
-  # NOTE: Do not force system-default-registry here.
-  # If we set it, we must have already retagged every cached image to ${primary_host}/...
-  # Retagging happens above; leaving system-default-registry unset ensures cached upstream names match.
-  :
-}
-
 
 # ---------- Image resolution strategy (local → offline registry(s)) ----------------------------
 # Ensures that: 1) staged images are loaded, 2) local images are retagged to match the
@@ -2516,8 +2441,8 @@ action_server() {
   log INFO "Loading site defaults..."
   load_site_defaults
 
-  local IP="" PREFIX="" HOSTNAME="" DNS="" SEARCH="" GW=""
-  local TLS_SANS_IN="" TLS_SANS=" "TOKEN=""
+  local IP="" PREFIX="" HOSTNAME="" DNS="" SEARCH=""
+  local TLS_SANS_IN="" TLS_SANS="" TOKEN="" GW=""
 
   if [[ -n "$CONFIG_FILE" ]]; then
     IP="$(yaml_spec_get "$CONFIG_FILE" ip || true)"
@@ -2715,7 +2640,6 @@ action_agent() {
   local SRC="$STAGE_DIR"
 
   # Ensure local images and registries fallback chain are in place
-  #setup_image_resolution_strategy
   log INFO "Proceeding with offline RKE2 agent install..."
   run_rke2_installer "$SRC" "agent"
     if [[ -n "${RUN_OUT_DIR:-}" ]]; then
