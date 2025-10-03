@@ -4,8 +4,8 @@ metadata:
   name: preprod-ca
 spec:
   # paths may be absolute or relative to the script directory
-  rootCrt: /etc/rancher/rke2/stage/certs/dev-certa001-ca-dev-local.crt
-  rootKey: /etc/ranger/rke2/stage/certs/dev-certa001-ca-dev-local-key.pem
+  rootCrt: /opt/rke2/certs/dev-certa001-ca-dev-local.crt
+  rootKey: /opt/rke2/certs/dev-certa001-ca-dev-local-key.pem
   #intermediateCrt: 
   #intermediateKey: 
   installToOSTrust: true
