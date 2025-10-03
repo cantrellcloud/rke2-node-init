@@ -15,7 +15,6 @@
   - [Command Reference](#command-reference)
     - [Common Flags](#common-flags)
     - [Makefile Helpers](#makefile-helpers)
-  - [Development Helpers](#development-helpers)
   - [YAML Configuration Reference](#yaml-configuration-reference)
   - [Offline Registry \& CA Handling](#offline-registry--ca-handling)
   - [Network Configuration Strategy](#network-configuration-strategy)
@@ -113,10 +112,7 @@ sudo ./rke2nodeinit.sh -f clusters/prod-server.yaml -P server
 - Each invocation prints the token to stdout and stores it under `outputs/generated-token/token-<YYYYMMDD-HHMMSS>.txt` with restrictive permissions so it can be reused later.
 - `make sh` marks every `*.sh` file in the repository root as executable so helper scripts remain runnable after cloning.
 - `make kubeconfig` installs `kubectl`, copies the RKE2 kubeconfig to `~/.kube/config`, and runs a quick connectivity check.
-
-## Development Helpers
-
-- **Generate reusable random tokens** – Run `make token` to print a fresh Base64 token and save it under
+ `make token` to print a fresh Base64 token and save it under
   `outputs/generated-token/token-<timestamp>.txt`. Override the number of random bytes (default `12`) by
   supplying `TOKEN_SIZE`, for example: `make token TOKEN_SIZE=24`.
 
