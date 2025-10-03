@@ -110,7 +110,17 @@ LOG_FILE="$LOG_DIR/rke2nodeinit_$(date -u +"%Y-%m-%dT%H-%M-%SZ").log"
 NERDCTL_FULL_TGZ=""
 NERDCTL_STD_TGZ=""
 
-# ---------- Help --------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
+# Function: print_help
+# Purpose : Emit the usage banner, supported YAML schema, and command examples
+#           to stdout. This function centralizes the CLI documentation so that
+#           both README writers and operators have a single source of truth for
+#           supported flags and configuration knobs.
+# Arguments:
+#   None
+# Returns :
+#   Always returns 0 after writing the help text.
+# ------------------------------------------------------------------------------
 print_help() {
   cat <<'EOF'
 NOTE: All YAML inputs must include a metadata.name field (e.g., metadata: { name: my-config }).
@@ -166,7 +176,17 @@ Outputs:
 EOF
 }
 
-# ---------- Functions () --------------------------------------------
+# ------------------------------------------------------------------------------
+# Function: log
+# Purpose : Write a structured log line to both stdout (for interactive
+#           feedback) and the rotating logfile (for long term evidence).
+# Arguments:
+#   $1 - Log level string (e.g., INFO, WARN, ERROR)
+#   $@ - Message components to be concatenated into a single log entry
+# Returns :
+#   Always returns 0. Errors while writing to the logfile will surface due to
+#   set -e semantics.
+# ------------------------------------------------------------------------------
 log() {
   local level="$1"; shift
   local msg="$*"
@@ -177,7 +197,18 @@ log() {
   printf "%s %s rke2nodeinit[%d]: %s %s\n" "$ts" "$host" "$$" "$level:" "$msg" >> "$LOG_FILE"
 }
 
-# Simple spinner for long-running steps (visible progress indicator)
+# ------------------------------------------------------------------------------
+# Function: spinner_run
+# Purpose : Execute a long-running command while providing an inline progress
+#           spinner on stdout. All command output is streamed to the logfile so
+#           the terminal remains quiet and the operator receives a live status
+#           indicator.
+# Arguments:
+#   $1 - Human readable label displayed next to the spinner
+#   $@ - Command and arguments to execute
+# Returns :
+#   Propagates the exit code of the wrapped command.
+# ------------------------------------------------------------------------------
 spinner_run() {
   local label="$1"; shift
   local cmd=( "$@" )
@@ -215,10 +246,50 @@ spinner_run() {
   fi
 }
 
-# ---------- Lightweight YAML helpers ------------------------------------------------------------
-yaml_get_api()  { grep -E '^[[:space:]]*apiVersion:[[:space:]]*' "$1" | awk -F: '{print $2}' | xargs; }
-yaml_get_kind() { grep -E '^[[:space:]]*kind:[[:space:]]*'       "$1" | awk -F: '{print $2}' | xargs; }
+# ------------------------------------------------------------------------------
+# Section: YAML Parsing Helpers
+# Purpose: Provide shell-friendly parsing utilities for the minimal YAML schema
+#          consumed by the script. These helpers intentionally avoid external
+#          dependencies so the script remains portable in constrained, offline
+#          environments.
+# ------------------------------------------------------------------------------
 
+# ------------------------------------------------------------------------------
+# Function: yaml_get_api
+# Purpose : Extract the apiVersion field from a YAML document.
+# Arguments:
+#   $1 - Path to the YAML file to inspect
+# Returns :
+#   Prints the apiVersion string (without surrounding whitespace) to stdout.
+# ------------------------------------------------------------------------------
+yaml_get_api() {
+  grep -E '^[[:space:]]*apiVersion:[[:space:]]*' "$1" | awk -F: '{print $2}' | xargs
+}
+
+# ------------------------------------------------------------------------------
+# Function: yaml_get_kind
+# Purpose : Extract the kind field from a YAML document so the caller can route
+#           execution logic.
+# Arguments:
+#   $1 - Path to the YAML file to inspect
+# Returns :
+#   Prints the kind string to stdout.
+# ------------------------------------------------------------------------------
+yaml_get_kind() {
+  grep -E '^[[:space:]]*kind:[[:space:]]*' "$1" | awk -F: '{print $2}' | xargs
+}
+
+# ------------------------------------------------------------------------------
+# Function: yaml_spec_get
+# Purpose : Retrieve a scalar value located under the spec: section of the YAML
+#           configuration using a dotted key path (e.g., registry.username).
+# Arguments:
+#   $1 - Path to the YAML document
+#   $2 - Dotted key representing the nested field within spec
+# Returns :
+#   Prints the located value to stdout. Exits with non-zero status if the key is
+#   not present.
+# ------------------------------------------------------------------------------
 yaml_spec_get() {
   local file="$1" key="$2"
   if command -v python3 >/dev/null 2>&1; then
@@ -297,6 +368,18 @@ PY
 }
 
 # --- YAML helpers (robust under 'spec:' for scalars and lists) ---
+
+# ------------------------------------------------------------------------------
+# Function: yaml_spec_get_any
+# Purpose : Return the first non-empty value among a list of dotted keys under
+#           the YAML spec section. Useful for honoring legacy aliases.
+# Arguments:
+#   $1 - Path to the YAML document
+#   $@ - One or more dotted keys to evaluate in order
+# Returns :
+#   Prints the first discovered value to stdout and returns 0. Returns 1 when no
+#   keys produce a value.
+# ------------------------------------------------------------------------------
 yaml_spec_get_any() {
   # Usage: yaml_spec_get_any <file> <key1> [key2] [key3] ...
   local file="$1"; shift || true
@@ -312,6 +395,15 @@ yaml_spec_get_any() {
   return 1
 }
 
+# ------------------------------------------------------------------------------
+# Function: yaml_spec_has_list
+# Purpose : Determine whether a spec.<key> entry is represented as a YAML list.
+# Arguments:
+#   $1 - Path to the YAML document
+#   $2 - Key that may point to a list
+# Returns :
+#   Returns 0 when the key is a list, 1 otherwise.
+# ------------------------------------------------------------------------------
 yaml_spec_has_list() {
   # Return 0 if spec.<key> is a YAML list
   local file="$1"; local key="$2"
@@ -330,6 +422,17 @@ yaml_spec_has_list() {
   ' "$file" | grep -q YES
 }
 
+# ------------------------------------------------------------------------------
+# Function: yaml_spec_list_items
+# Purpose : Emit each item from a YAML list located under spec.<key>. Items are
+#           printed without surrounding quotes to keep downstream parsing simple.
+# Arguments:
+#   $1 - Path to the YAML document
+#   $2 - Key referencing a YAML list under spec
+# Returns :
+#   Prints zero or more lines, one per list item. Returns 0 even if the list is
+#   empty.
+# ------------------------------------------------------------------------------
 yaml_spec_list_items() {
   # Print items of a YAML list under spec.<key>, one per line (no quoting)
   local file="$1"; local key="$2"
@@ -354,6 +457,18 @@ yaml_spec_list_items() {
   ' "$file"
 }
 
+# ------------------------------------------------------------------------------
+# Function: yaml_spec_list_csv
+# Purpose : Produce a comma-separated representation of a YAML list located
+#           under spec.<key>. This simplifies shell ingestion of repeated
+#           values.
+# Arguments:
+#   $1 - Path to the YAML document
+#   $2 - Key referencing a YAML list under spec
+# Returns :
+#   Prints a CSV string when list entries exist. Returns 1 when the list is
+#   absent.
+# ------------------------------------------------------------------------------
 yaml_spec_list_csv() {
   # Emit a comma-separated list from spec.<key> YAML list (if any)
   local file="$1"; local key="$2"
@@ -361,6 +476,16 @@ yaml_spec_list_csv() {
   [[ -n "$items" ]] && echo "$items"
 }
 
+# ------------------------------------------------------------------------------
+# Function: append_spec_config_extras
+# Purpose : Merge optional configuration keys from the YAML spec into the
+#           generated /etc/rancher/rke2/config.yaml while preventing duplicate
+#           entries.
+# Arguments:
+#   $1 - Path to the YAML document supplying optional overrides
+# Returns :
+#   Always returns 0 after conditionally appending keys.
+# ------------------------------------------------------------------------------
 append_spec_config_extras() {
   # Append additional config.yaml keys present in spec that we should honor.
   # Skips keys already present to avoid duplicates.
@@ -406,9 +531,16 @@ append_spec_config_extras() {
   done
 }
 
+# ------------------------------------------------------------------------------
+# Function: yaml_meta_get
+# Purpose : Read a value from the YAML metadata section (e.g., metadata.name).
+# Arguments:
+#   $1 - Path to the YAML document
+#   $2 - Key to extract from metadata
+# Returns :
+#   Prints the matching value when found, otherwise returns 1.
+# ------------------------------------------------------------------------------
 yaml_meta_get() {
-  # Get a key from the top-level "metadata:" section (e.g., "name")
-  # usage: yaml_meta_get <file> <key>
   local file="$1" key="$2"
   awk -v k="$key" '
     BEGIN { inMeta=0 }
@@ -426,8 +558,17 @@ yaml_meta_get() {
   ' "$file"
 }
 
+# ------------------------------------------------------------------------------
+# Function: ensure_yaml_has_metadata_name
+# Purpose : Guarantee that metadata.name exists in the provided YAML file and
+#           update SPEC_NAME accordingly so downstream logging and artifacts are
+#           namespaced.
+# Arguments:
+#   $1 - Optional path to the YAML file (defaults to CONFIG_FILE)
+# Returns :
+#   Exits with status 2 when metadata.name is absent. Otherwise returns 0.
+# ------------------------------------------------------------------------------
 ensure_yaml_has_metadata_name() {
-  # Validates that CONFIG_FILE has metadata.name; sets global SPEC_NAME
   local file="${1:-$CONFIG_FILE}"
   [[ -z "$file" || ! -f "$file" ]] && return 0
   local name
@@ -443,6 +584,16 @@ ensure_yaml_has_metadata_name() {
   log INFO "YAML metadata.name: ${SPEC_NAME}"
 }
 
+# ------------------------------------------------------------------------------
+# Function: sanitize_yaml
+# Purpose : Output a copy of the YAML configuration with secrets and tokens
+#           masked. This prevents sensitive values from leaking into logs or
+#           terminals when operators request a configuration preview.
+# Arguments:
+#   $1 - Path to the YAML document
+# Returns :
+#   Prints the sanitized YAML to stdout.
+# ------------------------------------------------------------------------------
 sanitize_yaml() {
   sed -E \
     -e 's/(registryPassword:[[:space:]]*)"[^"]*"/\1"********"/' \
@@ -452,6 +603,16 @@ sanitize_yaml() {
     "$1"
 }
 
+# ------------------------------------------------------------------------------
+# Function: normalize_list_csv
+# Purpose : Convert list-like strings (with brackets or varied quoting) into a
+#           clean, comma-separated representation suitable for prompts and
+#           logging.
+# Arguments:
+#   $1 - Raw list value
+# Returns :
+#   Prints the normalized CSV string.
+# ------------------------------------------------------------------------------
 normalize_list_csv() {
   local v="$1"
   v="${v#[}"; v="${v%]}"
@@ -459,6 +620,15 @@ normalize_list_csv() {
   echo "$v" | sed 's/,/ /g' | xargs | sed 's/ /, /g'
 }
 
+# ------------------------------------------------------------------------------
+# Function: normalize_bool_value
+# Purpose : Normalize boolean-like user input into lowercase true/false strings
+#           for safe YAML emission.
+# Arguments:
+#   $1 - Raw value to normalize
+# Returns :
+#   Prints "true" or "false" depending on the input content.
+# ------------------------------------------------------------------------------
 normalize_bool_value() {
   local raw="${1:-}"
   # shellcheck disable=SC2001
@@ -485,19 +655,106 @@ normalize_bool_value() {
   fi
 }
 
+# ------------------------------------------------------------------------------
+# Function: initialize_action_context
+# Purpose : Enforce metadata.name requirements when a YAML file is provided and
+#           optionally configure per-run output directories/log files based on
+#           the metadata name.
+# Arguments:
+#   $1 - Literal "true" to set up run directories; anything else skips
+#   $2 - Optional label written to the log when a run directory is created
+# Returns :
+#   Returns 0 on success. Exits if metadata.name is missing.
+# ------------------------------------------------------------------------------
+initialize_action_context() {
+  local create_run_dir="${1:-false}"
+  local label="${2:-}"
+
+  if [[ -n "$CONFIG_FILE" ]]; then
+    ensure_yaml_has_metadata_name "$CONFIG_FILE"
+  fi
+
+  if [[ "$create_run_dir" == "true" && -n "${SPEC_NAME:-}" ]]; then
+    mkdir -p "$OUT_DIR/$SPEC_NAME"
+    RUN_OUT_DIR="$OUT_DIR/$SPEC_NAME"
+    LOG_FILE="$LOG_DIR/${SPEC_NAME}_$(date -u +"%Y-%m-%dT%H-%M-%SZ").log"
+    export LOG_FILE RUN_OUT_DIR
+    if [[ -n "$label" ]]; then
+      log INFO "[$label] Using run output directory: $RUN_OUT_DIR"
+    else
+      log INFO "Using run output directory: $RUN_OUT_DIR"
+    fi
+  fi
+}
+
 # ---------- Validators --------------------------------------------------------------------------
+
+# ------------------------------------------------------------------------------
+# Function: valid_ipv4
+# Purpose : Validate dotted-decimal IPv4 addresses provided by users or YAML
+#           inputs.
+# Arguments:
+#   $1 - IPv4 string
+# Returns :
+#   Returns 0 when the IPv4 is syntactically valid and each octet falls within
+#   0-255. Returns 1 otherwise.
+# ------------------------------------------------------------------------------
 valid_ipv4() {
   [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
   IFS='.' read -r a b c d <<<"$1"
   for n in "$a" "$b" "$c" "$d"; do [[ "$n" -ge 0 && "$n" -le 255 ]] || return 1; done
 }
-valid_prefix() { [[ -z "$1" ]] && return 0; [[ "$1" =~ ^[0-9]{1,2}$ ]] && (( $1>=0 && $1<=32 )); }
-valid_ipv4_or_blank() { [[ -z "$1" ]] && return 0; valid_ipv4 "$1"; }
+
+# ------------------------------------------------------------------------------
+# Function: valid_prefix
+# Purpose : Ensure CIDR prefix lengths are within 0-32 when provided. Blank
+#           values are treated as acceptable defaults.
+# Arguments:
+#   $1 - Prefix length string
+# Returns :
+#   Returns 0 for valid prefixes or blanks, 1 otherwise.
+# ------------------------------------------------------------------------------
+valid_prefix() {
+  [[ -z "$1" ]] && return 0
+  [[ "$1" =~ ^[0-9]{1,2}$ ]] && (( $1>=0 && $1<=32 ))
+}
+
+# ------------------------------------------------------------------------------
+# Function: valid_ipv4_or_blank
+# Purpose : Accept either an empty string or a syntactically valid IPv4 address.
+# Arguments:
+#   $1 - IPv4 string or blank
+# Returns :
+#   Returns 0 when blank or valid IPv4, 1 otherwise.
+# ------------------------------------------------------------------------------
+valid_ipv4_or_blank() {
+  [[ -z "$1" ]] && return 0
+  valid_ipv4 "$1"
+}
+
+# ------------------------------------------------------------------------------
+# Function: valid_csv_dns
+# Purpose : Validate comma-separated IPv4 DNS lists entered via prompts or YAML
+#           files.
+# Arguments:
+#   $1 - CSV string of IPv4 addresses
+# Returns :
+#   Returns 0 when every entry is a valid IPv4 address. Returns 1 otherwise.
+# ------------------------------------------------------------------------------
 valid_csv_dns() {
   [[ -z "$1" ]] && return 0
   local s; s="$(echo "$1" | sed 's/,/ /g')"
   for x in $s; do valid_ipv4 "$x" || return 1; done
 }
+
+# ------------------------------------------------------------------------------
+# Function: valid_search_domains_csv
+# Purpose : Validate comma-separated DNS search domains supplied by operators.
+# Arguments:
+#   $1 - CSV string of domain names
+# Returns :
+#   Returns 0 when each domain conforms to RFC 1123 hostname requirements.
+# ------------------------------------------------------------------------------
 valid_search_domains_csv() {
   [[ -z "$1" ]] && return 0
   local s; s="$(echo "$1" | sed 's/,/ /g')"
@@ -507,6 +764,16 @@ valid_search_domains_csv() {
 }
 
 # ---------- APT helper --------------------------------------------------------------------------
+
+# ------------------------------------------------------------------------------
+# Function: ensure_installed
+# Purpose : Verify that the specified APT package is present and install it
+#           non-interactively when missing.
+# Arguments:
+#   $1 - Debian package name
+# Returns :
+#   Returns 0 when the package is installed successfully.
+# ------------------------------------------------------------------------------
 ensure_installed() {
   local pkg="$1"
   dpkg -s "$pkg" &>/dev/null || {
@@ -518,6 +785,17 @@ ensure_installed() {
 }
 
 # ---------- RKE2 version detection --------------------------------------------------------------
+
+# ------------------------------------------------------------------------------
+# Function: detect_latest_rke2_version
+# Purpose : Query GitHub for the most recent RKE2 release tag when the operator
+#           does not supply an explicit version. The result populates the global
+#           RKE2_VERSION variable.
+# Arguments:
+#   None
+# Returns :
+#   Sets RKE2_VERSION on success. Exits with status 2 on failure.
+# ------------------------------------------------------------------------------
 detect_latest_rke2_version() {
   if [[ -z "${RKE2_VERSION:-}" ]]; then
     log INFO "Detecting latest RKE2 version from GitHub..."
@@ -531,8 +809,17 @@ detect_latest_rke2_version() {
 }
 
 # ---------- Netplan helpers (robust) ------------------------------------------------------------
+
+# ------------------------------------------------------------------------------
+# Function: disable_cloud_init_net
+# Purpose : Prevent cloud-init from generating competing netplan definitions so
+#           the script can own network configuration.
+# Arguments:
+#   None
+# Returns :
+#   Always returns 0 after writing the disablement file.
+# ------------------------------------------------------------------------------
 disable_cloud_init_net() {
-  # prevent cloud-init from overwriting netplan on reboot
   mkdir -p /etc/cloud/cloud.cfg.d
   cat >/etc/cloud/cloud.cfg.d/99-disable-network-config.cfg <<'EOF'
 # Disable cloud-init network configuration; netplan is managed by rke2nodeinit
@@ -541,8 +828,16 @@ EOF
   log INFO "cloud-init network rendering disabled (/etc/cloud/cloud.cfg.d/99-disable-network-config.cfg)"
 }
 
+# ------------------------------------------------------------------------------
+# Function: purge_old_netplan
+# Purpose : Backup and remove existing netplan YAML files to avoid stale
+#           configurations lingering after script execution.
+# Arguments:
+#   None
+# Returns :
+#   Always returns 0 after ensuring the directory is clean.
+# ------------------------------------------------------------------------------
 purge_old_netplan() {
-  # back up and remove all existing netplan YAMLs to avoid merged old configs
   local bdir
   bdir="/etc/netplan/.backup-$(date -u +%Y%m%dT%H%M%SZ)"
   mkdir -p "$bdir"
@@ -560,8 +855,16 @@ purge_old_netplan() {
   fi
 }
 
+# ------------------------------------------------------------------------------
+# Function: apply_netplan_now
+# Purpose : Generate and apply the current netplan configuration immediately,
+#           leveraging spinner feedback for long-running operations.
+# Arguments:
+#   None
+# Returns :
+#   Returns 0 on success, 1 when netplan is unavailable.
+# ------------------------------------------------------------------------------
 apply_netplan_now() {
-  # Apply and verify current state; this makes changes effective immediately and also persists through reboot
   if command -v netplan >/dev/null 2>&1; then
     spinner_run "Generating netplan" netplan generate
     spinner_run "Applying netplan" netplan apply
@@ -573,8 +876,21 @@ apply_netplan_now() {
 }
 
 # ---------- Netplan writer (static IPv4 + DNS + search domains) --------------------------------
+
+# ------------------------------------------------------------------------------
+# Function: write_netplan
+# Purpose : Author the authoritative static netplan file using the supplied
+#           addressing information and apply it immediately.
+# Arguments:
+#   $1 - IPv4 address
+#   $2 - Prefix length
+#   $3 - Default gateway (optional)
+#   $4 - CSV DNS servers (optional)
+#   $5 - CSV search domains (optional)
+# Returns :
+#   Returns 0 on success, exits with status 2 when interface detection fails.
+# ------------------------------------------------------------------------------
 write_netplan() {
-  # Usage: write_netplan IP PREFIX GATEWAY DNS_CSV SEARCH_CSV
   local ip="$1"; local prefix="$2"; local gw="${3:-}"; local dns_csv="${4:-}"; local search_csv="${5:-}"
 
   # Detect primary NIC
@@ -645,6 +961,17 @@ write_netplan() {
 }
 
 # ---------- Site defaults -----------------------------------------------------------------------
+
+# ------------------------------------------------------------------------------
+# Function: load_site_defaults
+# Purpose : Source optional defaults captured during the image action (DNS and
+#           search domains) so server/agent actions can reuse them without
+#           reprompting the operator.
+# Arguments:
+#   None
+# Returns :
+#   Populates DEFAULT_DNS and DEFAULT_SEARCH in-place.
+# ------------------------------------------------------------------------------
 load_site_defaults() {
   local STATE="/etc/rke2image.defaults"
   if [[ -f "$STATE" ]]; then
@@ -657,8 +984,18 @@ load_site_defaults() {
   fi
 }
 
-# Build a comma CSV of default SANs from hostname/IP/search domains.
-# usage: capture_sans "<HOSTNAME>" "<IP>" "<SEARCH_CSV>"
+# ------------------------------------------------------------------------------
+# Function: capture_sans
+# Purpose : Build a comma-separated Subject Alternative Name list using the
+#           hostname, IP address, and optional DNS search domains. This ensures
+#           TLS SAN coverage for kube-apiserver endpoints.
+# Arguments:
+#   $1 - Hostname
+#   $2 - IPv4 address
+#   $3 - CSV string of search domains
+# Returns :
+#   Prints the constructed CSV string.
+# ------------------------------------------------------------------------------
 capture_sans() {
   local hn="$1" ip="$2" search_csv="$3"
   local out="$hn,$ip"
@@ -672,7 +1009,15 @@ capture_sans() {
   printf '%s' "$out"
 }
 
-# Emit a tls-san: list given a CSV string (no empty lines)
+# ------------------------------------------------------------------------------
+# Function: emit_tls_sans
+# Purpose : Write the tls-san YAML list derived from capture_sans() into the
+#           config file while trimming empty entries.
+# Arguments:
+#   $1 - CSV string of SAN entries
+# Returns :
+#   Prints a YAML fragment to stdout.
+# ------------------------------------------------------------------------------
 emit_tls_sans() {
   local csv="$1"
   [[ -z "$csv" ]] && return 0
@@ -684,6 +1029,16 @@ emit_tls_sans() {
   done
 }
 
+# ------------------------------------------------------------------------------
+# Function: check_system_settings
+# Purpose : Configure kernel modules and sysctl settings required by Kubernetes
+#           networking and container runtimes. Ensures br_netfilter and overlay
+#           are present and bridge forwarding sysctls are enabled.
+# Arguments:
+#   None
+# Returns :
+#   Always returns 0; failures bubble up via set -e.
+# ------------------------------------------------------------------------------
 check_system_settings() {
   log INFO "Configuring required kernel modules and sysctl settings..."
   mkdir -p /etc/modules-load.d /etc/sysctl.d
@@ -702,6 +1057,15 @@ EOF
   sysctl --system >/dev/null 2>>"$LOG_FILE" || true
 }
 
+# ------------------------------------------------------------------------------
+# Function: check_swap
+# Purpose : Disable swap immediately and ensure it stays disabled across reboots
+#           because Kubernetes components require swapless nodes.
+# Arguments:
+#   None
+# Returns :
+#   Always returns 0. Logs actions taken for auditability.
+# ------------------------------------------------------------------------------
 check_swap() {
   # ------------------ Swap off (now and persistent) ------------------
   log INFO "Disabling swap (now and persistent)..."
@@ -715,6 +1079,15 @@ check_swap() {
   fi
 }
 
+# ------------------------------------------------------------------------------
+# Function: check_networkmanager
+# Purpose : Configure NetworkManager, when present, to ignore CNI-managed
+#           interfaces so it does not interfere with Kubernetes networking.
+# Arguments:
+#   None
+# Returns :
+#   Always returns 0.
+# ------------------------------------------------------------------------------
 check_networkmanager() {
   # ------------------ NetworkManager: ignore CNI if present ------------------
   log INFO "Configuring NetworkManager (if present) to ignore cni*/flannel* interfaces..."
@@ -729,6 +1102,15 @@ NM
   fi
 }
 
+# ------------------------------------------------------------------------------
+# Function: check_iptables
+# Purpose : Ensure nftables-backed iptables binaries are selected so RKE2's CNI
+#           components operate with the expected firewall backend.
+# Arguments:
+#   None
+# Returns :
+#   Always returns 0.
+# ------------------------------------------------------------------------------
 check_iptables() {
   log INFO "Ensuring iptables-nft is the default iptables backend..."
   if update-alternatives --list iptables >/dev/null 2>&1; then
@@ -739,6 +1121,15 @@ check_iptables() {
   fi
 }
 
+# ------------------------------------------------------------------------------
+# Function: check_ufw
+# Purpose : Open the ports required by RKE2 when Ubuntu's Uncomplicated Firewall
+#           is active. Adds allowances for API, supervisor, kubelet, and VXLAN.
+# Arguments:
+#   None
+# Returns :
+#   Always returns 0.
+# ------------------------------------------------------------------------------
 check_ufw() {
   # ------------------ Open ports if UFW is active ------------------
   log INFO "Configuring UFW (if active) to allow RKE2 ports..."
@@ -752,6 +1143,15 @@ check_ufw() {
 }
 
 # ---------- OS prereqs --------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
+# Function: install_rke2_prereqs
+# Purpose : Aggregate prerequisite checks for offline installs. Installs base
+#           packages, configures networking prerequisites, and enforces swap off.
+# Arguments:
+#   None
+# Returns :
+#   Returns 0 on success; exits if any prerequisite step fails.
+# ------------------------------------------------------------------------------
 install_rke2_prereqs() {
   log INFO "Installing RKE2 prereqs (apt-packages, iptables-nft, modules, sysctl, swapoff, network-manager, ufw)..."
   export DEBIAN_FRONTEND=noninteractive
@@ -776,6 +1176,15 @@ install_rke2_prereqs() {
 
 }
 
+# ------------------------------------------------------------------------------
+# Function: verify_prereqs
+# Purpose : Run prerequisite validation without mutating the system. Confirms
+#           kernel modules, swap state, networking, and firewall settings.
+# Arguments:
+#   None
+# Returns :
+#   Exits with non-zero status when a prerequisite is missing.
+# ------------------------------------------------------------------------------
 verify_prereqs() {
   local fail=0
   log INFO "Verifying prerequisites and environment..."
@@ -824,13 +1233,40 @@ verify_prereqs() {
 }
 
 # ---------- SBOM / metadata (optional) ----------------------------------------------------------
+# ------------------------------------------------------------------------------
+# Function: sanitize_img
+# Purpose : Convert an image reference into a filesystem-safe string by replacing
+#           slashes and colons. Used when emitting SBOM and inspect outputs.
+# Arguments:
+#   $1 - Image reference
+# Returns :
+#   Prints a sanitized string suitable for filenames.
+# ------------------------------------------------------------------------------
 sanitize_img() { echo "$1" | sed 's#/#_#g; s#:#_#g'; }
 
+# ------------------------------------------------------------------------------
+# Function: gen_inspect_json
+# Purpose : Capture nerdctl image inspect data for a given image and persist it
+#           alongside SBOM data.
+# Arguments:
+#   $1 - Image reference
+# Returns :
+#   Writes JSON to the outputs directory; returns 0 on success.
+# ------------------------------------------------------------------------------
 gen_inspect_json() {
   local img="$1"
   nerdctl -n k8s.io inspect "$img" 2>/dev/null || echo "{}"
 }
 
+# ------------------------------------------------------------------------------
+# Function: gen_sbom_or_metadata
+# Purpose : Produce an SPDX SBOM via syft when available or fall back to nerdctl
+#           inspect output. Ensures offline environments retain provenance data.
+# Arguments:
+#   $1 - Image reference
+# Returns :
+#   Generates files under the outputs directory for later auditing.
+# ------------------------------------------------------------------------------
 gen_sbom_or_metadata() {
   local img="$1" base
   base="$(sanitize_img "$img")"
@@ -843,6 +1279,15 @@ gen_sbom_or_metadata() {
   fi
 }
 
+# ------------------------------------------------------------------------------
+# Function: resolve_custom_ca_path
+# Purpose : Normalize custom CA file paths to absolute paths relative to the
+#           script directory when needed.
+# Arguments:
+#   $1 - Raw file path
+# Returns :
+#   Prints the resolved absolute path.
+# ------------------------------------------------------------------------------
 resolve_custom_ca_path() {
   local input_path="$1"
   [[ -n "$input_path" ]] || return 0
@@ -871,6 +1316,15 @@ resolve_custom_ca_path() {
   printf '%s' "$resolved"
 }
 
+# ------------------------------------------------------------------------------
+# Function: load_custom_ca_from_config
+# Purpose : Pull custom certificate authority locations from the YAML spec and
+#           load them into global variables for later trust operations.
+# Arguments:
+#   $1 - Path to YAML configuration
+# Returns :
+#   Populates CUSTOM_CA_* globals when entries are present.
+# ------------------------------------------------------------------------------
 load_custom_ca_from_config() {
   local file="$1"
   [[ -n "$file" ]] || return 0
@@ -913,6 +1367,15 @@ load_custom_ca_from_config() {
   fi
 }
 
+# ------------------------------------------------------------------------------
+# Function: is_cert_trusted_by_system_store
+# Purpose : Determine whether a given certificate already exists in the system
+#           trust store to avoid reinstallation.
+# Arguments:
+#   $1 - Path to certificate file
+# Returns :
+#   Returns 0 when trusted, 1 otherwise.
+# ------------------------------------------------------------------------------
 is_cert_trusted_by_system_store() {
   # Best-effort detection that a certificate is trusted by the host's certificate store.
   # Works for both custom cluster roots and generated server-ca certificates that chain to it.
@@ -963,6 +1426,15 @@ is_cert_trusted_by_system_store() {
   return 1
 }
 
+# ------------------------------------------------------------------------------
+# Function: find_trusted_cluster_ca_certificate
+# Purpose : Search known certificate locations for an existing RKE2 cluster CA
+#           so join tokens can reuse it.
+# Arguments:
+#   None
+# Returns :
+#   Prints the path to the certificate when found.
+# ------------------------------------------------------------------------------
 find_trusted_cluster_ca_certificate() {
   # Locate a CA certificate suitable for deriving the full cluster token. Preference order:
   #  1) Generated server-ca from an initialized server node
@@ -1013,6 +1485,15 @@ find_trusted_cluster_ca_certificate() {
   return 1
 }
 
+# ------------------------------------------------------------------------------
+# Function: ensure_full_cluster_token
+# Purpose : Expand short RKE2 tokens into the full token format that includes the
+#           custom CA checksum when required.
+# Arguments:
+#   $1 - Token string
+# Returns :
+#   Prints the normalized token.
+# ------------------------------------------------------------------------------
 ensure_full_cluster_token() {
   # Convert a short join token (e.g. server:xxxxxxxx) into the "full" token format required
   # when custom CAs are in use: K10<cluster-ca-hash>::<credentials-or-password>.
@@ -1064,6 +1545,16 @@ ensure_full_cluster_token() {
   printf 'K10%s::%s' "$ca_hash" "$trimmed"
 }
 
+# ------------------------------------------------------------------------------
+# Function: run_rke2_installer
+# Purpose : Execute the cached RKE2 installer script with environment variables
+#           pointing to staged artifacts for offline installation.
+# Arguments:
+#   $1 - Stage directory containing artifacts
+#   $2 - Install type (server or agent)
+# Returns :
+#   Exits with installer status.
+# ------------------------------------------------------------------------------
 run_rke2_installer() {
   local src="$1"
   local itype="${2:-}"
@@ -1084,6 +1575,15 @@ run_rke2_installer() {
   return 0
 }
 
+# ------------------------------------------------------------------------------
+# Function: setup_custom_cluster_ca
+# Purpose : Install custom cluster CAs into the RKE2 configuration and optionally
+#           system trust so API clients trust the private registry.
+# Arguments:
+#   None (uses globals populated from YAML)
+# Returns :
+#   Returns 0 on success.
+# ------------------------------------------------------------------------------
 setup_custom_cluster_ca() {
   local ROOT_CRT="${CUSTOM_CA_ROOT_CRT:-}"
   local ROOT_KEY="${CUSTOM_CA_ROOT_KEY:-}"
@@ -1176,6 +1676,15 @@ setup_custom_cluster_ca() {
 
 }
 
+# ------------------------------------------------------------------------------
+# Function: verify_custom_cluster_ca
+# Purpose : Validate that required CA files exist before proceeding with custom
+#           cluster certificate operations.
+# Arguments:
+#   None
+# Returns :
+#   Returns 0 when prerequisites are met, 1 otherwise.
+# ------------------------------------------------------------------------------
 verify_custom_cluster_ca() {
   local TLS_DIR="/var/lib/rancher/rke2/server/tls"
   local ROOT_CA="${CUSTOM_CA_ROOT_CRT:-$TLS_DIR/root-ca.pem}"
@@ -1244,6 +1753,15 @@ verify_custom_cluster_ca() {
   return $fail
 }
 
+# ------------------------------------------------------------------------------
+# Function: ensure_staged_artifacts
+# Purpose : Confirm that the expected offline tarballs and installer scripts are
+#           present in the staging directory prior to server/agent installs.
+# Arguments:
+#   None
+# Returns :
+#   Exits with status 3 when artifacts are missing.
+# ------------------------------------------------------------------------------
 ensure_staged_artifacts() {
   local missing=0
   if [[ ! -f "$STAGE_DIR/install.sh" ]]; then
@@ -1275,6 +1793,15 @@ ensure_staged_artifacts() {
   fi
 }
 
+# ------------------------------------------------------------------------------
+# Function: setup_image_resolution_strategy
+# Purpose : Configure containerd image resolution order, preferring local tarball
+#           caches before falling back to upstream registries.
+# Arguments:
+#   None
+# Returns :
+#   Returns 0 on success.
+# ------------------------------------------------------------------------------
 setup_image_resolution_strategy() {
   # Read primary and fallback registries from YAML (if present), else derive from existing variables.
   local primary_registry="" fallback_registry="" default_offline_registry="" primary_host="" fallback_host="" default_host=""
@@ -1333,6 +1860,15 @@ setup_image_resolution_strategy() {
 # Ensures that: 1) staged images are loaded, 2) local images are retagged to match the
 # system-default-registry prefix so containerd will use them without pulling, and
 # 3) registries.yaml mirrors point to your offline registry endpoints in priority order.
+# ------------------------------------------------------------------------------
+# Function: load_staged_images
+# Purpose : Load the pre-downloaded RKE2 image archive into containerd using
+#           nerdctl so offline hosts have required images available.
+# Arguments:
+#   None
+# Returns :
+#   Returns 0 on success, exits when archive missing.
+# ------------------------------------------------------------------------------
 load_staged_images() {
   # Load any pre-staged images into containerd so we can retag them.
   shopt -s nullglob
@@ -1353,6 +1889,15 @@ load_staged_images() {
   fi
 }
 
+# ------------------------------------------------------------------------------
+# Function: retag_local_images_with_prefix
+# Purpose : Apply a registry prefix to all cached images to mimic the structure
+#           of the private registry prior to pushing.
+# Arguments:
+#   $1 - Registry hostname or namespace prefix
+# Returns :
+#   Returns 0 on success.
+# ------------------------------------------------------------------------------
 retag_local_images_with_prefix() {
   # Give every locally available image an additional name that includes the private registry host.
   # This guarantees kubelet/containerd can find the content locally when it asks for
@@ -1377,6 +1922,16 @@ retag_local_images_with_prefix() {
   log INFO "Retagged local images with registry prefix: $reg_host/… (best-effort)."
 }
 
+# ------------------------------------------------------------------------------
+# Function: ensure_hosts_pin
+# Purpose : Ensure /etc/hosts contains an entry mapping the registry hostname to
+#           the provided IP when strict pinning is requested.
+# Arguments:
+#   $1 - Registry hostname
+#   $2 - IPv4 address
+# Returns :
+#   Returns 0 on success.
+# ------------------------------------------------------------------------------
 ensure_hosts_pin() {
   # Optionally force-resolve a registry name when DNS is not yet populated.
   local host="$1" ip="$2"
@@ -1387,6 +1942,15 @@ ensure_hosts_pin() {
   fi
 }
 
+# ------------------------------------------------------------------------------
+# Function: write_registries_yaml_with_fallbacks
+# Purpose : Generate /etc/rancher/rke2/registries.yaml including mirrors, custom
+#           endpoints, and optional TLS settings with fallback behavior.
+# Arguments:
+#   None (uses globals populated earlier)
+# Returns :
+#   Writes the YAML file; returns 0 on success.
+# ------------------------------------------------------------------------------
 write_registries_yaml_with_fallbacks() {
   # Build a registries.yaml that points common upstreams to your offline endpoints in priority order.
   # Args: primary_host [fallback_host] [default_offline_host] [username] [password] [ca_file]
@@ -1466,6 +2030,15 @@ EOF
   log INFO "Wrote /etc/rancher/rke2/registries.yaml with endpoints (priority): ${primary}${fallback:+, ${fallback}}${default_offline:+, ${default_offline}}"
 }
 
+# ------------------------------------------------------------------------------
+# Function: fetch_rke2_ca_generator
+# Purpose : Download the cluster CA helper script from Rancher releases and cache
+#           it locally for offline use.
+# Arguments:
+#   None
+# Returns :
+#   Returns 0 on success.
+# ------------------------------------------------------------------------------
 fetch_rke2_ca_generator() { 
   # Prefetch custom-CA helper for offline use
   if command -v curl >/dev/null 2>&1; then
@@ -1477,6 +2050,15 @@ fetch_rke2_ca_generator() {
   fi
 }
 
+# ------------------------------------------------------------------------------
+# Function: cache_rke2_artifacts
+# Purpose : Download and verify all required RKE2 release artifacts (images,
+#           tarballs, checksums) storing them under the downloads directory.
+# Arguments:
+#   None
+# Returns :
+#   Exits if downloads fail or checksums mismatch.
+# ------------------------------------------------------------------------------
 cache_rke2_artifacts() {
   mkdir -p "$DOWNLOADS_DIR"
   pushd "$DOWNLOADS_DIR" >/dev/null
@@ -1537,6 +2119,15 @@ cache_rke2_artifacts() {
   fi
 }
 
+# ------------------------------------------------------------------------------
+# Function: ca_trust_registries
+# Purpose : Install custom registry CA certificates into the OS trust store and
+#           update the bundle so nerdctl and RKE2 trust the private registry.
+# Arguments:
+#   $1 - Path to CA certificate
+# Returns :
+#   Returns 0 on success.
+# ------------------------------------------------------------------------------
 ca_trust_registries() {
   # --- Optional: CA trust + registries mirrors -------------------------------
   local CA_BN=""
@@ -1574,6 +2165,15 @@ ca_trust_registries() {
   : > /etc/rancher/rke2/config.yaml
 }
 
+# ------------------------------------------------------------------------------
+# Function: install_nerdctl
+# Purpose : Install the nerdctl runtime bundle (standalone or full) depending on
+#           host state, ensuring containerd and supporting binaries are present.
+# Arguments:
+#   $1 - Installation mode (standalone or full)
+# Returns :
+#   Returns 0 on success.
+# ------------------------------------------------------------------------------
 install_nerdctl() {
   # --- Detect/cache nerdctl: FULL (cache only) + standalone (install) --------
   ensure_installed curl
@@ -1637,6 +2237,15 @@ install_nerdctl() {
   fi
 }
 
+# ------------------------------------------------------------------------------
+# Function: prompt_reboot
+# Purpose : Ask the operator whether to reboot immediately unless auto-approve
+#           (-y) is in effect. Used after image/server/agent workflows.
+# Arguments:
+#   None
+# Returns :
+#   Initiates reboot when approved; otherwise returns 0.
+# ------------------------------------------------------------------------------
 prompt_reboot() {
   echo
   if (( AUTO_YES )); then
@@ -1664,9 +2273,17 @@ prompt_reboot() {
 
 # ==================
 # Action: PUSH
+# ------------------------------------------------------------------------------
+# Function: action_push
+# Purpose : Handle the push workflow: load cached images, retag them for the
+#           private registry, optionally generate SBOM data, and push via nerdctl.
+# Arguments:
+#   None (uses globals derived from CLI/YAML)
+# Returns :
+#   Exits on failure of any stage.
+# ------------------------------------------------------------------------------
 action_push() {
-  # Require metadata.name when a YAML file is provided
-  if [[ -n "$CONFIG_FILE" ]]; then ensure_yaml_has_metadata_name "$CONFIG_FILE"; fi
+  initialize_action_context false "push"
 
   if [[ -n "$CONFIG_FILE" ]]; then
     REGISTRY="$(yaml_spec_get "$CONFIG_FILE" registry || echo "$REGISTRY")"
@@ -1736,16 +2353,18 @@ action_push() {
 
 # ==============
 # Action: IMAGE
+# ------------------------------------------------------------------------------
+# Function: action_image
+# Purpose : Prepare a golden image for offline deployment by installing
+#           prerequisites, downloading artifacts, caching registries configuration,
+#           and writing documentation of the run.
+# Arguments:
+#   None
+# Returns :
+#   Exits on failure; triggers reboot prompt on completion.
+# ------------------------------------------------------------------------------
 action_image() {
-  # Require metadata.name; set per-run directories + log
-  if [[ -n "$CONFIG_FILE" ]]; then ensure_yaml_has_metadata_name "$CONFIG_FILE"; fi
-  if [[ -n "${SPEC_NAME:-}" ]]; then
-    mkdir -p "$OUT_DIR/$SPEC_NAME"
-    RUN_OUT_DIR="$OUT_DIR/$SPEC_NAME"
-    LOG_FILE="$LOG_DIR/${SPEC_NAME}_$(date -u +"%Y-%m-%dT%H-%M-%SZ").log"
-    export LOG_FILE RUN_OUT_DIR
-    log INFO "Using run output directory: $RUN_OUT_DIR"
-  fi
+  initialize_action_context true "image"
 
   # --- Read YAML (optional) -------------------------------------------------
   local REQ_VER="${RKE2_VERSION:-}"
@@ -1873,9 +2492,18 @@ action_image() {
 # ==============
 # Action: SERVER (bootstrap a brand-new control plane)
 # Uses cached artifacts from action_image() and writes /etc/rancher/rke2/config.yaml
+# ------------------------------------------------------------------------------
+# Function: action_server
+# Purpose : Configure an offline RKE2 server node including network settings,
+#           TLS SANs, custom CA integration, and execution of the installer.
+# Arguments:
+#   None
+# Returns :
+#   Exits on failure; prompts for reboot when complete.
+# ------------------------------------------------------------------------------
 action_server() {
+  initialize_action_context false "server"
   log INFO "Ensure YAML has metadata.name..."
-  if [[ -n "$CONFIG_FILE" ]]; then ensure_yaml_has_metadata_name "$CONFIG_FILE"; fi
 
   log INFO "Loading site defaults..."
   load_site_defaults
@@ -2000,18 +2628,18 @@ action_server() {
 
 # ==================
 # Action: AGENT
+# ------------------------------------------------------------------------------
+# Function: action_agent
+# Purpose : Configure an offline RKE2 agent node, prompting for network settings
+#           and join information, then running the installer and persisting
+#           artifacts for auditing.
+# Arguments:
+#   None
+# Returns :
+#   Exits on failure; prompts for reboot upon success.
+# ------------------------------------------------------------------------------
 action_agent() {
-  # Per-metadata outputs/logging
-  if [[ -n "$CONFIG_FILE" ]]; then ensure_yaml_has_metadata_name "$CONFIG_FILE"; fi
-  if [[ -n "${SPEC_NAME:-}" ]]; then
-    mkdir -p "$OUT_DIR/$SPEC_NAME"
-    RUN_OUT_DIR="$OUT_DIR/$SPEC_NAME"
-    LOG_FILE="$LOG_DIR/${SPEC_NAME}_$(date -u +"%Y-%m-%dT%H-%M-%SZ").log"
-    export LOG_FILE RUN_OUT_DIR
-    log INFO "Using run output directory: $RUN_OUT_DIR"
-  fi
-  # Require metadata.name when a YAML file is provided
-  if [[ -n "$CONFIG_FILE" ]]; then ensure_yaml_has_metadata_name "$CONFIG_FILE"; fi
+  initialize_action_context true "agent"
 
   load_site_defaults
 
@@ -2114,9 +2742,17 @@ action_agent() {
 
 # ================
 # Action: ADD_SERVER
+# ------------------------------------------------------------------------------
+# Function: action_add_server
+# Purpose : Enroll an additional server node into an existing RKE2 cluster using
+#           staged artifacts and optional custom CA trust.
+# Arguments:
+#   None
+# Returns :
+#   Exits on failure; prompts for reboot upon success.
+# ------------------------------------------------------------------------------
 action_add_server() {
-  # Require metadata.name when a YAML file is provided
-  if [[ -n "$CONFIG_FILE" ]]; then ensure_yaml_has_metadata_name "$CONFIG_FILE"; fi
+  initialize_action_context false "add-server"
 
   load_site_defaults
 
@@ -2238,6 +2874,15 @@ action_add_server() {
 
 # ==================
 # Action: VERIFY
+# ------------------------------------------------------------------------------
+# Function: action_verify
+# Purpose : Run validation checks to ensure a node is ready for RKE2 installation
+#           without performing mutations. Useful for health inspections.
+# Arguments:
+#   None
+# Returns :
+#   Returns 0 when all checks pass; non-zero otherwise.
+# ------------------------------------------------------------------------------
 action_verify() {
   load_site_defaults
 if verify_prereqs; then
@@ -2252,8 +2897,17 @@ if verify_prereqs; then
 # ==================
 # Action: AIRGAP
 # One-liner wrapper: prep the image and power off for templating
+# ------------------------------------------------------------------------------
+# Function: action_airgap
+# Purpose : Variant of action_image used when the operator wants to skip the
+#           automatic reboot so the VM can be powered off for templating.
+# Arguments:
+#   None
+# Returns :
+#   Exits on failure; prints next steps on success.
+# ------------------------------------------------------------------------------
 action_airgap() {
-  if [[ -n "$CONFIG_FILE" ]]; then ensure_yaml_has_metadata_name "$CONFIG_FILE"; fi
+  initialize_action_context false "airgap"
   NO_REBOOT=1 action_image
   sync
   log WARN "Powering off now so you can template/clone the VM."
