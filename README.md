@@ -69,36 +69,72 @@ Each action can be driven directly from the CLI or from a YAML manifest (`apiVer
 
 ```mermaid
 flowchart TD
-    A[Start: Run rke2nodeinit.sh] --> B{Is user root?}
-    B -- No --> C[Exit: Prompt to run as root]
-    click C call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh#L11")
-    B -- Yes --> D{Are Windows line endings detected?}
-    D -- Yes --> E[Exit: Prompt to run dos2unix]
-    click E call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh#L17")
-    D -- No --> F[Set up environment and directories]
-    click F call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh#L61")
-    F --> G{Which action?}
-    G -- push --> H[Load images, retag, generate SBOM, push to registry]
-    click H call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh#L1092")
-    G -- image --> I[Install prereqs, cache artifacts, configure registry/CA, save defaults, reboot]
-    click I call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh#L1162")
-    G -- server --> J[Configure network, hostname, TLS SAN, custom CA, install rke2-server, reboot]
-    click J call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh#L1302")
-    G -- agent --> K[Configure network, join info, install rke2-agent, reboot]
-    click K call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh#L1437")
-    G -- add-server --> L[Join additional server to cluster, configure, install, reboot]
-    click L call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh#L1557")
-    G -- verify --> M[Check system prerequisites, report status]
-    click M call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh#L1672")
-    G -- airgap --> N[Run image prep, power off for templating]
-    click N call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh#L1692")
-    H --> O[End]
-    I --> O
-    J --> O
-    K --> O
-    L --> O
-    M --> O
-    N --> O
+    style Start fill:#e0f7fa,stroke:#00796b,stroke-width:2px,color:#004d40
+    style CheckBash fill:#fff9c4,stroke:#fbc02d,stroke-width:2px,color:#827717
+    style CheckRoot fill:#ffe0b2,stroke:#e65100,stroke-width:2px,color:#4e2600
+    style CheckCRLF fill:#f8bbd0,stroke:#c2185b,stroke-width:2px,color:#880e4f
+    style ParseArgs fill:#d1c4e9,stroke:#512da8,stroke-width:2px,color:#311b92
+    style SelectAction fill:#c5e1a5,stroke:#388e3c,stroke-width:2px,color:#1b5e20
+    style ActionImage fill:#b3e5fc,stroke:#0288d1,stroke-width:2px,color:#01579b
+    style ActionPush fill:#ffccbc,stroke:#d84315,stroke-width:2px,color:#bf360c
+    style ActionServer fill:#c8e6c9,stroke:#388e3c,stroke-width:2px,color:#1b5e20
+    style ActionAgent fill:#f0f4c3,stroke:#afb42b,stroke-width:2px,color:#827717
+    style ActionVerify fill:#f5f5f5,stroke:#616161,stroke-width:2px,color:#212121
+    style ActionAirgap fill:#b2dfdb,stroke:#00796b,stroke-width:2px,color:#004d40
+    style ActionAddServer fill:#d7ccc8,stroke:#6d4c41,stroke-width:2px,color:#3e2723
+    style End fill:#e1bee7,stroke:#6a1b9a,stroke-width:2px,color:#4a148c
+
+    Start(["Start Script"])
+    CheckBash["Check if running under Bash"]
+    CheckRoot["Check if running as root"]
+    CheckCRLF["Check for Windows line endings"]
+    ParseArgs["Parse CLI arguments and YAML config"]
+    SelectAction{"Select Action"}
+    ActionImage["Image: Prepare air-gapped image"]
+    ActionPush["Push: Tag & push images to registry"]
+    ActionServer["Server: Configure & install rke2-server"]
+    ActionAgent["Agent: Configure & install rke2-agent"]
+    ActionVerify["Verify: Check prerequisites"]
+    ActionAirgap["Airgap: Prepare image & power off"]
+    ActionAddServer["AddServer: Join new server to cluster"]
+    End(["End"])
+
+    Start --> CheckBash
+    CheckBash --> CheckRoot
+    CheckRoot --> CheckCRLF
+    CheckCRLF --> ParseArgs
+    ParseArgs --> SelectAction
+
+    SelectAction -->|image| ActionImage
+    SelectAction -->|push| ActionPush
+    SelectAction -->|server| ActionServer
+    SelectAction -->|agent| ActionAgent
+    SelectAction -->|verify| ActionVerify
+    SelectAction -->|airgap| ActionAirgap
+    SelectAction -->|add-server| ActionAddServer
+
+    ActionImage --> End
+    ActionPush --> End
+    ActionServer --> End
+    ActionAgent --> End
+    ActionVerify --> End
+    ActionAirgap --> End
+    ActionAddServer --> End
+
+    click Start call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh#L1")
+    click CheckBash call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh#L4")
+    click CheckRoot call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh#L9")
+    click CheckCRLF call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh#L15")
+    click ParseArgs call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh#L1012")
+    click SelectAction call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh#L1092")
+    click ActionImage call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh#L664")
+    click ActionPush call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh#L563")
+    click ActionServer call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh#L828")
+    click ActionAgent call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh#L944")
+    click ActionVerify call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh#L1102")
+    click ActionAirgap call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh#L1121")
+    click ActionAddServer call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh#L1057")
+    click End call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh")
 ```
 
 ---
