@@ -21,8 +21,8 @@ token:
 		TOKEN="$(openssl rand -base64 ${TOKEN_SIZE})"; \
 		printf '%s\n' "${TOKEN}" | tee "${TOKEN_FILE}"; \
 		chmod 600 "${TOKEN_FILE}"; \
-		echo "     Token ${TOKEN}"; \
-		echo "Token File ${TOKEN_FILE};"
+		echo "     Token: $${TOKEN}"; \
+		echo "Token File: ${TOKEN_FILE};"
 
 ## Mark all Bash scripts in the repository root as executable.
 sh:
