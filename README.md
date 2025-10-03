@@ -102,6 +102,11 @@ sudo ./rke2nodeinit.sh -f clusters/prod-server.yaml -P server
 | `--dry-push` | Simulate `push` without contacting the registry |
 | `-h` | Display built-in help |
 
+### Makefile Helpers
+
+- `make token` generates a base64 token using OpenSSL. Override the byte length with `TOKEN_SIZE=<n>` (default `12`) to control the entropy, for example `make token TOKEN_SIZE=24`.
+- Each invocation prints the token to stdout and stores it under `outputs/generated-token/token-<YYYYMMDD-HHMMSS>.txt` with restrictive permissions so it can be reused later.
+
 ---
 
 ## YAML Configuration Reference
