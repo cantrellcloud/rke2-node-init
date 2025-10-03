@@ -1160,7 +1160,7 @@ install_rke2_prereqs() {
   log INFO "Installing required packages..."
   spinner_run "Installing required packages" apt-get install -y \
     curl ca-certificates iptables nftables ethtool socat conntrack iproute2 \
-    ebtables openssl tar gzip zstd jq net-tools
+    ebtables openssl tar gzip zstd jq net-tools make
   log INFO "Removing unnecessary packages..."
   spinner_run "Removing unnecessary packages" apt-get autoremove -y # >>"$LOG_FILE" 2>&1
 
