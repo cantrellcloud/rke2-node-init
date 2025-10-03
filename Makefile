@@ -7,11 +7,11 @@
 # generating the base64 token. The resulting token is echoed to stdout and
 # persisted under outputs/generated-token/ with the invocation timestamp.
 
-SHELL := /bin/bash
-TOKEN_SIZE ?= 32
-TOKEN_OUTPUT_DIR := outputs/generated-token
-TOKEN_TIMESTAMP := $(shell date +%Y%m%d-%H%M%S)
-TOKEN_FILE := ${TOKEN_OUTPUT_DIR}/token-${TOKEN_TIMESTAMP}.txt
+export SHELL := /bin/bash
+export TOKEN_SIZE ?= 32
+export TOKEN_OUTPUT_DIR := outputs/generated-token
+export TOKEN_TIMESTAMP := $(shell date +%Y%m%d-%H%M%S)
+export TOKEN_FILE := ${TOKEN_OUTPUT_DIR}/token-${TOKEN_TIMESTAMP}.txt
 
 .PHONY: token sh kubeconfig
 ## Generate a reusable base64 token and persist it for later use.
@@ -21,8 +21,8 @@ token:
 		TOKEN="$(openssl rand -base64 ${TOKEN_SIZE})"; \
 		printf '%s\n' "${TOKEN}" | tee "${TOKEN_FILE}"; \
 		chmod 600 "${TOKEN_FILE}"; \
-		echo "     Token ${TOKEN}" \
-		echo "Token File ${TOKEN_FILE}"
+		echo "     Token ${TOKEN}"; \
+		echo "Token File ${TOKEN_FILE};"
 
 ## Mark all Bash scripts in the repository root as executable.
 sh:
