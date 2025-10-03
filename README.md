@@ -1,6 +1,6 @@
 # rke2nodeinit.sh
 
-`rke2nodeinit.sh` is a hardened automation script for preparing and configuring Ubuntu/Debian hosts for fully offline Rancher RKE2 clusters. It orchestrates artifact caching, registry mirroring, operating system hardening, and the eventual server/agent installation without relying on Docker. All functionality is implemented with Bash and standard GNU utilities so the workflow remains portable inside air-gapped environments.
+`rke2nodeinit.sh` is a hardened automation script for preparing and configuring Ubuntu/Debian hosts for fully offline Rancher RKE2 clusters. It orchestrates artifact caching, registry mirroring, operating system hardening, and the eventual server/agent installation using only Bash and standard GNU utilities, keeping the workflow portable inside air-gapped environments. Only the `image` action contacts the Internet to gather artifacts; all other actions are designed to run without network access.
 
 ---
 
@@ -26,7 +26,7 @@
 ## Key Capabilities
 
 - **Air-Gapped Friendly** – Downloads every RKE2 artifact (images, binaries, checksums, installer) in advance and stages them under `/opt/rke2/stage` for disconnected installs.
-- **Container Runtime Alignment** – Installs the official `nerdctl` bundles (standalone + FULL) and enables containerd with systemd cgroup support. Docker is never required.
+- **Container Runtime Alignment** – Installs the official `nerdctl` bundles (standalone + FULL) and enables containerd with systemd cgroup support while avoiding extra runtime dependencies.
 - **Registry Mirroring & Trust** – Writes `/etc/rancher/rke2/registries.yaml` with mirror priorities, optional authentication, and custom certificate authorities. Automatically pushes cached images with SBOM metadata.
 - **Network Hardening** – Disables cloud-init network rendering, purges legacy Netplan files, writes a single authoritative static IPv4 configuration, and applies it immediately.
 - **Security Guardrails** – Runs with `set -Eeuo pipefail`, surfaces line numbers on failure, validates user input, masks secrets when printing YAML, and clamps file permissions.
@@ -41,7 +41,7 @@
 | --- | --- |
 | Operating systems | Ubuntu/Debian variants with `systemd`, `apt`, and `netplan` |
 | Privileges | Must be executed as `root` (use `sudo`) |
-| Connectivity | `pull` / `push` require internet access. `image` / `server` / `agent` / `verify` run offline once artifacts are staged |
+| Connectivity | `image` requires Internet access for artifact acquisition. `push`, `server`, `agent`, `verify`, and `airgap` must run without Internet access |
 | Disk space | Several GB for RKE2 tarballs, images, SBOM data, and logs |
 | Optional tooling | [`syft`](https://github.com/anchore/syft) for SPDX SBOMs. Without it, nerdctl inspect metadata is produced |
 | External dependencies | Private registry endpoint, optional custom CA, and YAML configuration matching `apiVersion: rkeprep/v1` |
@@ -50,12 +50,11 @@
 
 ## Workflow Overview
 
-1. **Pull (online):** Detect or pin an RKE2 release, download all artifacts, verify checksums, and cache nerdctl bundles.
-2. **Push (online):** Load cached images into containerd, retag them against a private registry prefix, generate SBOM or inspect data, and push.
-3. **Image (offline target base):** Install OS prerequisites, copy cached artifacts into `/opt/rke2/stage`, capture default DNS/search domains, install optional CA trust, and reboot so the VM can be templated.
-4. **Server / Add-Server (offline host):** Configure hostname, static networking, TLS SANs, registries, custom CA trust, and execute the cached RKE2 installer.
-5. **Agent (offline host):** Mirror the server flow while collecting join tokens, optional CA trust, and persisting run artifacts to `outputs/<metadata.name>/`.
-6. **Verify:** Perform prerequisite checks without mutating the system. Useful for smoke tests and compliance validation.
+1. **Image (online artifact gathering & base preparation):** Detect or pin an RKE2 release, download all artifacts, verify checksums, cache nerdctl bundles, install OS prerequisites, copy cached artifacts into `/opt/rke2/stage`, capture default DNS/search domains, install optional CA trust, and reboot so the VM can be templated. This step downloads supplemental content and therefore requires Internet access.
+2. **Push (offline registry sync):** Load cached images into containerd, retag them against a private registry prefix, generate SBOM or inspect data, and push to an internally reachable registry without using the public Internet.
+3. **Server / Add-Server (offline host):** Configure hostname, static networking, TLS SANs, registries, custom CA trust, and execute the cached RKE2 installer.
+4. **Agent (offline host):** Mirror the server flow while collecting join tokens, optional CA trust, and persisting run artifacts to `outputs/<metadata.name>/`.
+5. **Verify:** Perform prerequisite checks without mutating the system. Useful for smoke tests and compliance validation.
 
 Each action can be driven directly from the CLI or from a YAML manifest (`apiVersion: rkeprep/v1`) that centralizes inputs and secrets.
 
@@ -65,9 +64,8 @@ Each action can be driven directly from the CLI or from a YAML manifest (`apiVer
 
 | Action | Typical Location | Description |
 | --- | --- | --- |
-| `pull` | Connected build node | Download & verify RKE2 release artifacts and nerdctl bundles |
-| `push` | Connected build node | Push cached images into your private registry, emitting manifests + SBOMs |
-| `image` | Offline target template | Install prereqs, stage artifacts, configure registry trust, capture defaults, and reboot |
+| `push` | Offline registry host | Push cached images into your private registry, emitting manifests + SBOMs without touching the public Internet |
+| `image` | Connected template host (Internet required) | Download & verify RKE2 release artifacts and nerdctl bundles, install prereqs, stage artifacts, configure registry trust, capture defaults, and reboot |
 | `server` | Offline RKE2 control-plane | Configure static networking, TLS, tokens, custom CA, and install `rke2-server` |
 | `add-server` | Offline additional control-plane | Same as `server` but tailored for existing clusters |
 | `agent` | Offline worker node | Configure network, join tokens, CA trust, and install `rke2-agent` |
@@ -82,7 +80,7 @@ Each action honors both CLI flags and YAML values. When both are provided, YAML 
 
 ```bash
 # With a manifest
-sudo ./rke2nodeinit.sh -f clusters/prod-pull.yaml pull
+sudo ./rke2nodeinit.sh -f clusters/prod-image.yaml image
 
 # Direct action without YAML
 sudo ./rke2nodeinit.sh --dry-push push -r reg.example.local/rke2 -u svc -p 'secret'
@@ -99,7 +97,7 @@ sudo ./rke2nodeinit.sh -f clusters/prod-server.yaml -P server
 | `-v VERSION` | Explicit RKE2 release (e.g., `v1.34.1+rke2r1`) |
 | `-r REGISTRY` | Private registry (host[/namespace]) |
 | `-u/-p` | Registry credentials |
-| `-y` | Auto-confirm prompts (reboots, Docker removal) |
+| `-y` | Auto-confirm prompts (reboots, legacy runtime cleanup) |
 | `-P` | Print sanitized YAML (passwords/tokens masked) |
 | `--dry-push` | Simulate `push` without contacting the registry |
 | `-h` | Display built-in help |
@@ -178,7 +176,7 @@ The script normalizes CSV values (commas or YAML lists) and masks secrets when p
 
 ```text
 <repo>/
-├─ downloads/                        # pull/push cache (images, tarballs, installers, nerdctl bundles)
+├─ downloads/                        # image/push cache (images, tarballs, installers, nerdctl bundles)
 ├─ outputs/
 │  ├─ <metadata.name>/               # run-specific exports (README, configs, CA copies)
 │  └─ sbom/                          # SBOM or inspect metadata per image

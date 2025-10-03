@@ -36,6 +36,12 @@ esac
 #   4) agent  - Configure network/hostname and install rke2-agent  (offline)
 #   5) verify - Check that node prerequisites are in place
 #
+# Connectivity expectations:
+#   - image is the only action that requires Internet access in order to gather
+#     artifacts. It should be run from a host with outbound connectivity.
+#   - push, server, add-server, agent, verify, and airgap are intended to run fully
+#     offline and must not initiate Internet access.
+#
 # Major changes vs previous:
 #   - Runtime install uses official "nerdctl-full" bundle (includes containerd, runc, CNI, BuildKit).
 #   - Fixed verify() return code logic so success returns 0.
@@ -49,7 +55,7 @@ esac
 #   - strong input validation for IP/prefix/DNS/search
 #
 # YAML (apiVersion: rkeprep/v1) kinds determine action when using -f <file>:
-#   - kind: Pull|pull, Push|push, Image|image, Server|server, AddServer|add-server|addServer, Agent|agent, ClusterCA|cluster-ca
+#   - kind: Push|push, Image|image, Server|server, AddServer|add-server|addServer, Agent|agent, ClusterCA|cluster-ca
 #
 # Exit codes:
 #   0 success | 1 usage | 2 missing prerequisites | 3 data missing | 4 registry auth | 5 YAML issues
@@ -84,7 +90,7 @@ case "$ARCH" in
 esac
 
 DEFAULT_DNS="10.0.1.34,10.231.1.34"
-AUTO_YES=0                  # -y auto-confirm reboots *and* Docker removal if detected
+AUTO_YES=0                  # -y auto-confirm reboots and any legacy runtime cleanup if detected
 PRINT_CONFIG=0              # -P print sanitized YAML
 DRY_PUSH=0                  # --dry-push skips actual registry push
 
@@ -127,7 +133,7 @@ NOTE: All YAML inputs must include a metadata.name field (e.g., metadata: { name
 Usage:
   sudo ./rke2nodeinit.sh -f file.yaml [options]
   sudo ./rke2nodeinit.sh [options] <push|image|server|add-server|agent|verify>
-  sudo ./rke2nodeinit.sh examples/pull.yaml
+  sudo ./rke2nodeinit.sh examples/image.yaml image
 
 
 YAML kinds (apiVersion: rkeprep/v1):
@@ -150,7 +156,7 @@ Options:
   -r REG      Private registry (host[/namespace]), e.g., reg.example.org/rke2
   -u USER     Registry username
   -p PASS     Registry password
-  -y          Auto-confirm prompts (reboots, Docker removal)
+  -y          Auto-confirm prompts (reboots, legacy runtime cleanup)
   -P          Print sanitized YAML to screen (masks secrets)
   -h          Show this help
   --dry-push  Do not actually push images to registry (simulate only)
@@ -1769,7 +1775,7 @@ ensure_staged_artifacts() {
       cp "$DOWNLOADS_DIR/install.sh" "$STAGE_DIR/" && chmod +x "$STAGE_DIR/install.sh"
       log INFO "Staged install.sh"
     else
-      log ERROR "Missing install.sh. Run 'pull' first."; missing=1
+      log ERROR "Missing install.sh. Run 'image' first."; missing=1
     fi
   fi
   if [[ ! -f "$STAGE_DIR/$RKE2_TARBALL" ]]; then
@@ -1777,7 +1783,7 @@ ensure_staged_artifacts() {
       cp "$DOWNLOADS_DIR/$RKE2_TARBALL" "$STAGE_DIR/"
       log INFO "Staged RKE2 tarball"
     else
-      log ERROR "Missing $RKE2_TARBALL. Run 'pull' first."; missing=1
+      log ERROR "Missing $RKE2_TARBALL. Run 'image' first."; missing=1
     fi
   fi
   if [[ ! -f "$STAGE_DIR/$SHA256_FILE" ]]; then
@@ -1785,7 +1791,7 @@ ensure_staged_artifacts() {
       cp "$DOWNLOADS_DIR/$SHA256_FILE" "$STAGE_DIR/"
       log INFO "Staged SHA256 file"
     else
-      log ERROR "Missing $SHA256_FILE. Run 'pull' first."; missing=1
+      log ERROR "Missing $SHA256_FILE. Run 'image' first."; missing=1
     fi
   fi
   if (( missing != 0 )); then
@@ -2054,6 +2060,8 @@ fetch_rke2_ca_generator() {
 # Function: cache_rke2_artifacts
 # Purpose : Download and verify all required RKE2 release artifacts (images,
 #           tarballs, checksums) storing them under the downloads directory.
+# Note    : Invoked by the image action, which is the only workflow permitted to
+#           access the Internet.
 # Arguments:
 #   None
 # Returns :
@@ -2296,7 +2304,7 @@ action_push() {
 
   local work="$DOWNLOADS_DIR"
   if [[ ! -f "$work/$IMAGES_TAR" ]]; then
-    log ERROR "Images archive not found in $work. Run 'pull' first."
+    log ERROR "Images archive not found in $work. Run 'image' first."
     exit 3
   fi
 
