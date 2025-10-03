@@ -11,6 +11,7 @@
   - [Key Capabilities](#key-capabilities)
   - [Supported Platforms \& Requirements](#supported-platforms--requirements)
   - [Workflow Overview](#workflow-overview)
+  - [Process Flow Chart](#process-flow-chart)
   - [Actions Breakdown](#actions-breakdown)
   - [Command Reference](#command-reference)
     - [Common Flags](#common-flags)
@@ -61,6 +62,44 @@
 5. **Verify:** Perform prerequisite checks without mutating the system. Useful for smoke tests and compliance validation.
 
 Each action can be driven directly from the CLI or from a YAML manifest (`apiVersion: rkeprep/v1`) that centralizes inputs and secrets.
+
+---
+
+## Process Flow Chart
+
+```mermaid
+flowchart TD
+    A[Start: Run rke2nodeinit.sh] --> B{Is user root?}
+    B -- No --> C[Exit: Prompt to run as root]
+    click C call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh#L11")
+    B -- Yes --> D{Are Windows line endings detected?}
+    D -- Yes --> E[Exit: Prompt to run dos2unix]
+    click E call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh#L17")
+    D -- No --> F[Set up environment and directories]
+    click F call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh#L61")
+    F --> G{Which action?}
+    G -- push --> H[Load images, retag, generate SBOM, push to registry]
+    click H call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh#L1092")
+    G -- image --> I[Install prereqs, cache artifacts, configure registry/CA, save defaults, reboot]
+    click I call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh#L1162")
+    G -- server --> J[Configure network, hostname, TLS SAN, custom CA, install rke2-server, reboot]
+    click J call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh#L1302")
+    G -- agent --> K[Configure network, join info, install rke2-agent, reboot]
+    click K call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh#L1437")
+    G -- add-server --> L[Join additional server to cluster, configure, install, reboot]
+    click L call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh#L1557")
+    G -- verify --> M[Check system prerequisites, report status]
+    click M call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh#L1672")
+    G -- airgap --> N[Run image prep, power off for templating]
+    click N call linkCallback("d:/repositories/cocloud/rke2-node-init/rke2nodeinit.sh#L1692")
+    H --> O[End]
+    I --> O
+    J --> O
+    K --> O
+    L --> O
+    M --> O
+    N --> O
+```
 
 ---
 
