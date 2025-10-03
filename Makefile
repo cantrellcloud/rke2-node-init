@@ -8,7 +8,7 @@
 # persisted under outputs/generated-token/ with the invocation timestamp.
 
 SHELL := /bin/bash
-TOKEN_SIZE ?= 12
+TOKEN_SIZE ?= 32
 TOKEN_OUTPUT_DIR := outputs/generated-token
 TOKEN_TIMESTAMP := $(shell date +%Y%m%d-%H%M%S)
 TOKEN_FILE := $(TOKEN_OUTPUT_DIR)/token-$(TOKEN_TIMESTAMP).txt
