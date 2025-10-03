@@ -31,6 +31,6 @@ spec:
 
   # Optional: your CA handling
   customCA:
-    rootCrt: certs/rke2-cert.crt
-    rootKey: certs/rke2-cert-key.pem
+    rootCrt: certs/rke2ca-cert.crt
+    rootKey: certs/rke2ca-cert-key.pem
     installToOSTrust: true
