@@ -18,11 +18,11 @@ export TOKEN_FILE := ${TOKEN_OUTPUT_DIR}/token-${TOKEN_TIMESTAMP}.txt
 token:
 	@set -euo pipefail; \
 		install -d -m 700 ${TOKEN_OUTPUT_DIR}; \
-		TOKEN="$(openssl rand -base64 ${TOKEN_SIZE})"; \
-		printf '%s\n' "${TOKEN}" | tee "${TOKEN_FILE}"; \
+		TOKEN="$$(openssl rand -base64 ${TOKEN_SIZE})"; \
+		printf '%s\n' "$${TOKEN}" | tee "${TOKEN_FILE}"; \
 		chmod 600 "${TOKEN_FILE}"; \
 		echo "     Token: $${TOKEN}"; \
-		echo "Token File: ${TOKEN_FILE};"
+		echo "Token File: ${TOKEN_FILE}";
 
 ## Mark all Bash scripts in the repository root as executable.
 sh:
