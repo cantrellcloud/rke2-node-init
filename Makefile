@@ -13,7 +13,7 @@ TOKEN_OUTPUT_DIR := outputs/generated-token
 TOKEN_TIMESTAMP := $(shell date +%Y%m%d-%H%M%S)
 TOKEN_FILE := $(TOKEN_OUTPUT_DIR)/token-$(TOKEN_TIMESTAMP).txt
 
-.PHONY: token make-executable make-kubeconfig
+.PHONY: token sh kubeconfig
 ## Generate a reusable base64 token and persist it for later use.
 token:
 	@set -euo pipefail; \
@@ -22,16 +22,17 @@ token:
 		TOKEN_FILE="$(TOKEN_FILE)"; \
 		printf '%s\n' "$$TOKEN" | tee "$$TOKEN_FILE"; \
 		chmod 600 "$$TOKEN_FILE"; \
-		echo "Saved token to $$TOKEN_FILE" >&2
+		echo "     Token: $$TOKEN" >&2
+		echo "Token File: $$TOKEN_FILE" >&2
 
 ## Mark all Bash scripts in the repository root as executable.
-make-executable:
+sh:
 	@set -euo pipefail; \
 		shopt -s nullglob; \
 		chmod a+x *.sh
 
 ## Install kubectl and copy the RKE2 kubeconfig for the current user.
-make-kubeconfig:
+kubeconfig:
 	@set -euo pipefail; \
 		mkdir -p $$HOME/.kube; \
 		sudo cp /etc/rancher/rke2/rke2.yaml $$HOME/.kube/config; \
