@@ -6,20 +6,25 @@
 
 ## Table of Contents
 
-1. [Key Capabilities](#key-capabilities)
-2. [Supported Platforms & Requirements](#supported-platforms--requirements)
-3. [Workflow Overview](#workflow-overview)
-4. [Actions Breakdown](#actions-breakdown)
-5. [Command Reference](#command-reference)
-6. [YAML Configuration Reference](#yaml-configuration-reference)
-7. [Offline Registry & CA Handling](#offline-registry--ca-handling)
-8. [Network Configuration Strategy](#network-configuration-strategy)
-9. [Logging & Observability](#logging--observability)
-10. [Safety Controls & Idempotency](#safety-controls--idempotency)
-11. [Generated Files & Directory Layout](#generated-files--directory-layout)
-12. [Verification & Troubleshooting](#verification--troubleshooting)
-13. [Maintenance & Rollback Tips](#maintenance--rollback-tips)
-14. [Appendix: Environment Variables](#appendix-environment-variables)
+- [rke2nodeinit.sh](#rke2nodeinitsh)
+  - [Table of Contents](#table-of-contents)
+  - [Key Capabilities](#key-capabilities)
+  - [Supported Platforms \& Requirements](#supported-platforms--requirements)
+  - [Workflow Overview](#workflow-overview)
+  - [Actions Breakdown](#actions-breakdown)
+  - [Command Reference](#command-reference)
+    - [Common Flags](#common-flags)
+    - [Makefile Helpers](#makefile-helpers)
+  - [Development Helpers](#development-helpers)
+  - [YAML Configuration Reference](#yaml-configuration-reference)
+  - [Offline Registry \& CA Handling](#offline-registry--ca-handling)
+  - [Network Configuration Strategy](#network-configuration-strategy)
+  - [Logging \& Observability](#logging--observability)
+  - [Safety Controls \& Idempotency](#safety-controls--idempotency)
+  - [Generated Files \& Directory Layout](#generated-files--directory-layout)
+  - [Verification \& Troubleshooting](#verification--troubleshooting)
+  - [Maintenance \& Rollback Tips](#maintenance--rollback-tips)
+  - [Appendix: Environment Variables](#appendix-environment-variables)
 
 ---
 
@@ -107,7 +112,11 @@ sudo ./rke2nodeinit.sh -f clusters/prod-server.yaml -P server
 - `make token` generates a base64 token using OpenSSL. Override the byte length with `TOKEN_SIZE=<n>` (default `12`) to control the entropy, for example `make token TOKEN_SIZE=24`.
 - Each invocation prints the token to stdout and stores it under `outputs/generated-token/token-<YYYYMMDD-HHMMSS>.txt` with restrictive permissions so it can be reused later.
 
----
+## Development Helpers
+
+- **Generate reusable random tokens** – Run `make token` to print a fresh Base64 token and save it under
+  `outputs/generated-token/token-<timestamp>.txt`. Override the number of random bytes (default `12`) by
+  supplying `TOKEN_SIZE`, for example: `make token TOKEN_SIZE=24`.
 
 ## YAML Configuration Reference
 
